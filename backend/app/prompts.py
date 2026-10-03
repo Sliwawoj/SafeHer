@@ -41,13 +41,14 @@ RUNDA 1 (Start / Odebranie):
 - Tylko powitanie + luźny temat towarzyski.
 - CAŁKOWITY ZAKAZ mówienia o trasie, sklepach, Orlenie, Carrefourze, Żabce,
   czekaniu pod czymkolwiek, „skręć”, „idź”, kierunkach.
-- Możesz (i powinieneś) wywołać `find_safe_haven` W TLE / BEZ GŁOSU — wynik
-  zostaw na RUNDĘ 2; NIE cytuj go jeszcze na głos.
+- CAŁKOWITY ZAKAZ wywoływania `find_safe_haven` w tej rundzie — backend już
+  przygotowuje punkty w tle. Najpierw MÓW (1–2 zdania), potem czekaj.
 - Przykład: „Hejka, wyszedłem już z psem przed klatkę, strasznie piździ na dworze.
   Daleko jeszcze masz?”
 
 RUNDA 2 (Po jej pierwszej odpowiedzi — JEDYNE wskazanie punktu):
-- Dopiero teraz wpleć punkt z Overpass jako miejsce spotkania w JEDNYM krótkim zdaniu
+- Teraz wolno wywołać `find_safe_haven` (zwykle natychmiast z cache) i wpleć
+  punkt jako miejsce spotkania w JEDNYM krótkim zdaniu.
   (ew. + jedno krótkie domknięcie). Bez metrów, azymutów, turn-by-turn.
 - ŹLE: „Skręć na południowy wschód 90 metrów do Carrefour Express”.
 - DOBRZE: „Dobra, to stój, poczekaj na mnie przy tym Carrefourze na rogu,
@@ -140,9 +141,9 @@ def build_system_instruction(
     if mode_key == "LOUDSPEAKER":
         extras.append(
             "Na starcie = RUNDA 1: max 1–2 krótkie zdania, luźne powitanie, "
-            "ZERO sklepów/trasy na głos. find_safe_haven tylko w tle. "
-            "Punkt spotkania dopiero w RUNDZIE 2 (po jej pierwszej odpowiedzi), "
-            "potem rundy 3+ bez nawigacji (wyjątki: jej pytanie albo po ≥5 wymianach)."
+            "ZERO sklepów/trasy i ZERO tool calls. "
+            "Punkt spotkania dopiero w RUNDZIE 2 (po jej pierwszej odpowiedzi) "
+            "przez find_safe_haven, potem rundy 3+ bez nawigacji."
         )
     else:
         extras.append(
@@ -162,8 +163,8 @@ def mode_switch_hint(mode: str) -> str:
         )
     return (
         "[Zmiana trybu] Od teraz tryb GŁOŚNOMÓWIĄCY. Max 1–2 zdania na odpowiedź. "
-        "Nowa rozmowa: R1 bez trasy, R2 jedno zdanie o punkcie spotkania, "
-        "R3+ blokada nawigacji. Bez update_threat_info."
+        "R1: mów od razu bez tooli. R2: find_safe_haven + jedno zdanie o punkcie. "
+        "R3+: blokada nawigacji. Bez update_threat_info."
     )
 
 
@@ -171,14 +172,14 @@ def pickup_nudge(mode: str) -> str:
     mode_key = (mode or "LOUDSPEAKER").upper()
     if mode_key == "SILENT":
         return (
-            "Połączenie właśnie odebrane. Przywitaj się krótko i naturalnie. "
+            "Połączenie właśnie odebrane. Od razu przywitaj się głosem (1–2 zdania). "
             "Zapytaj, czy mam pokierować do najbliższego otwartego bezpiecznego miejsca. "
             "Nie wywołuj find_safe_haven bez potwierdzenia."
         )
     return (
-        "Połączenie właśnie odebrane — to RUNDA 1. "
-        "Powiedz maksymalnie 1–2 krótkie zdania: luźne hej + temat towarzyski "
-        "(pies, zimno, pizza). ZAKAZ mówienia o sklepie/trasie/nawigacji. "
-        "Możesz wywołać find_safe_haven tylko w tle, bez cytowania wyniku. "
-        "Potem CZEKAJ na jej odpowiedź."
+        "Połączenie właśnie odebrane — RUNDA 1. "
+        "NATYCHMIAST powiedz maksymalnie 1–2 krótkie zdania na głos "
+        "(luźne hej + pies/zimno/pizza). "
+        "ZAKAZ narzędzi w tej rundzie — nie wołaj find_safe_haven. "
+        "ZAKAZ sklepu/trasy. Potem CZEKAJ na jej odpowiedź."
     )

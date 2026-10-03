@@ -33,6 +33,9 @@ from .protocol import (
 
 logger = logging.getLogger("safeher.live")
 
+GEMINI_CONNECT_ATTEMPTS = 3
+GEMINI_CONNECT_RETRY_DELAY_S = 0.8
+
 
 def _live_tools() -> list[types.Tool]:
     find_safe_haven = types.FunctionDeclaration(
@@ -90,6 +93,7 @@ class LiveBridge:
         self._send_lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._gemini: Any | None = None
+        self._haven_task: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
         await self.ws.accept()
@@ -102,6 +106,11 @@ class LiveBridge:
                 locale=init.locale,
                 contact_name=init.contact_name,
             )
+            # Warm Overpass while Gemini handshake runs — greeting must not wait on it.
+            self._haven_task = asyncio.create_task(
+                self._prefetch_safe_havens(),
+                name="prefetch_safe_havens",
+            )
             await self._run_gemini_session(init)
         except WebSocketDisconnect:
             logger.info("client disconnected")
@@ -112,6 +121,9 @@ class LiveBridge:
             )
         finally:
             self._stop.set()
+            if self._haven_task and not self._haven_task.done():
+                self._haven_task.cancel()
+                await asyncio.gather(self._haven_task, return_exceptions=True)
             await self._safe_close()
 
     async def _await_session_init(self) -> SessionInit:
@@ -160,51 +172,97 @@ class LiveBridge:
             tools=_live_tools(),
         )
 
-        try:
-            async with client.aio.live.connect(
-                model=self.settings.gemini_model,
-                config=config,
-            ) as session:
-                self._gemini = session
-                logger.info("gemini connected session_id=%s", self.state.session_id)
+        last_error: Exception | None = None
+        for attempt in range(1, GEMINI_CONNECT_ATTEMPTS + 1):
+            try:
+                async with client.aio.live.connect(
+                    model=self.settings.gemini_model,
+                    config=config,
+                ) as session:
+                    await self._run_live_session(session, init)
+                return
+            except TimeoutError as exc:
+                last_error = exc
+                logger.warning(
+                    "gemini connect timeout session_id=%s attempt=%s/%s",
+                    self.state.session_id,
+                    attempt,
+                    GEMINI_CONNECT_ATTEMPTS,
+                )
+                if attempt < GEMINI_CONNECT_ATTEMPTS:
+                    await asyncio.sleep(GEMINI_CONNECT_RETRY_DELAY_S * attempt)
+            except WebSocketDisconnect:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("gemini session error")
                 await self._safe_send_json(
-                    session_ready_payload(
-                        self.state.session_id,
-                        input_rate=self.settings.audio_input_sample_rate,
-                        output_rate=self.settings.audio_output_sample_rate,
-                    )
+                    session_error_payload("gemini_unavailable", str(exc))
                 )
-                logger.info("session.ready sent session_id=%s", self.state.session_id)
-                client_task = asyncio.create_task(
-                    self._pump_client_to_gemini(session),
-                    name="client_to_gemini",
-                )
-                gemini_task = asyncio.create_task(
-                    self._pump_gemini_to_client(session),
-                    name="gemini_to_client",
-                )
-                await session.send_realtime_input(text=pickup_nudge(init.mode))
-                done, pending = await asyncio.wait(
-                    {client_task, gemini_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                self._stop.set()
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                for task in done:
-                    if task.cancelled():
-                        continue
-                    exc = task.exception()
-                    if exc and not isinstance(exc, WebSocketDisconnect):
-                        raise exc
-        except WebSocketDisconnect:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("gemini session error")
-            await self._safe_send_json(
-                session_error_payload("gemini_unavailable", str(exc))
+                return
+
+        assert last_error is not None
+        logger.exception("gemini connect failed after retries")
+        await self._safe_send_json(
+            session_error_payload(
+                "gemini_unavailable",
+                f"Gemini Live handshake timeout after {GEMINI_CONNECT_ATTEMPTS} attempts",
             )
+        )
+
+    async def _run_live_session(self, session: Any, init: SessionInit) -> None:
+        assert self.state is not None
+        self._gemini = session
+        logger.info("gemini connected session_id=%s", self.state.session_id)
+        await self._safe_send_json(
+            session_ready_payload(
+                self.state.session_id,
+                input_rate=self.settings.audio_input_sample_rate,
+                output_rate=self.settings.audio_output_sample_rate,
+            )
+        )
+        logger.info("session.ready sent session_id=%s", self.state.session_id)
+        client_task = asyncio.create_task(
+            self._pump_client_to_gemini(session),
+            name="client_to_gemini",
+        )
+        gemini_task = asyncio.create_task(
+            self._pump_gemini_to_client(session),
+            name="gemini_to_client",
+        )
+        await session.send_realtime_input(text=pickup_nudge(init.mode))
+        done, pending = await asyncio.wait(
+            {client_task, gemini_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        self._stop.set()
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            if task.cancelled():
+                continue
+            exc = task.exception()
+            if exc and not isinstance(exc, WebSocketDisconnect):
+                raise exc
+
+    async def _prefetch_safe_havens(self) -> None:
+        assert self.state is not None
+        loc = self.state.location
+        if loc is None:
+            self.state.cached_safe_havens = []
+            return
+        places = await get_nearby_safe_havens(
+            loc.lat,
+            loc.lng,
+            radius=self.settings.safe_haven_radius_m,
+            overpass_url=self.settings.overpass_url,
+        )
+        self.state.cached_safe_havens = places
+        logger.info(
+            "prefetch_safe_havens session_id=%s count=%s",
+            self.state.session_id,
+            len(places),
+        )
 
     async def _pump_client_to_gemini(self, session: Any) -> None:
         mime = f"audio/pcm;rate={self.settings.audio_input_sample_rate}"
@@ -306,18 +364,35 @@ class LiveBridge:
         loc = self.state.location
         if loc is None:
             return {"ok": True, "places": [], "note": "brak lokalizacji GPS"}
+
+        if self.state.cached_safe_havens is None and self._haven_task is not None:
+            try:
+                await self._haven_task
+            except Exception:  # noqa: BLE001
+                logger.warning("prefetch_safe_havens await failed", exc_info=True)
+
+        if self.state.cached_safe_havens is not None:
+            places = self.state.cached_safe_havens
+            logger.info(
+                "find_safe_haven session_id=%s count=%s cached=true",
+                self.state.session_id,
+                len(places),
+            )
+            return {"ok": True, "places": places, "cached": True}
+
         places = await get_nearby_safe_havens(
             loc.lat,
             loc.lng,
             radius=self.settings.safe_haven_radius_m,
             overpass_url=self.settings.overpass_url,
         )
+        self.state.cached_safe_havens = places
         logger.info(
-            "find_safe_haven session_id=%s count=%s",
+            "find_safe_haven session_id=%s count=%s cached=false",
             self.state.session_id,
             len(places),
         )
-        return {"ok": True, "places": places}
+        return {"ok": True, "places": places, "cached": False}
 
     async def _tool_update_threat_info(self, args: dict[str, Any]) -> dict[str, Any]:
         assert self.state is not None
@@ -389,6 +464,13 @@ class LiveBridge:
         if msg_type == "session.update_location":
             update = SessionUpdateLocation.model_validate(payload)
             self.state.location = update.location
+            self.state.cached_safe_havens = None
+            if self._haven_task and not self._haven_task.done():
+                self._haven_task.cancel()
+            self._haven_task = asyncio.create_task(
+                self._prefetch_safe_havens(),
+                name="prefetch_safe_havens",
+            )
             return False
 
         if msg_type == "session.set_mode":

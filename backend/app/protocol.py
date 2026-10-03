@@ -187,3 +187,4 @@ class SessionState(BaseModel):
     last_summary: str | None = Field(default=None)
     threat: ThreatInfo = Field(default_factory=ThreatInfo)
     last_sms_body: str | None = Field(default=None)
+    cached_safe_havens: list[dict[str, Any]] | None = Field(default=None)
