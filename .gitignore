@@ -1,0 +1,43 @@
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+**/.env
+!**/.env.example
+
+# Python
+backend/venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+*.egg-info/
+.venv/
+
+# Node / Expo / React Native
+mobile/node_modules/
+mobile/.expo/
+mobile/dist/
+mobile/web-build/
+mobile/ios/
+mobile/android/
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs & temp
+*.log
+npm-debug.log*
+.cache/
+tmp/
+temp/
