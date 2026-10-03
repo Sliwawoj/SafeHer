@@ -1,0 +1,16 @@
+{
+  "name": "safeher-audio",
+  "version": "0.1.0",
+  "description": "Local PCM16 mic/speaker streaming for SafeHer Live",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {},
+  "keywords": ["expo", "audio", "pcm"],
+  "author": "SafeHer",
+  "license": "MIT",
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}

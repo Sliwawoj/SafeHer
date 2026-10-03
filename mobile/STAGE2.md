@@ -1,19 +1,35 @@
-# SafeHer — Etap 2: Mobile Dialer + PCM Streaming
+# SafeHer — Etap 2: Mobile Dialer + lokalne PCM
 
-## Stack audio (Development Build)
+## Audio
 
-Używamy `@edkimmel/expo-audio-stream` zamiast nieutrzymywanego `react-native-live-audio-stream`:
+Lokalny moduł Expo: `modules/safeher-audio`
+- Mic: `AudioRecord` PCM16 mono @ 16 kHz → event `onAudioChunk` (base64) → WebSocket binary
+- Speaker: `AudioTrack` PCM16 mono @ 24 kHz ← WebSocket binary
 
-| Kierunek | API | Format |
-|----------|-----|--------|
-| Mikrofon → WS | `ExpoPlayAudioStream.startMicrophone` @ 16 kHz | PCM16 LE (base64 → binary frame) |
-| WS → głośnik | `Pipeline` (native AudioTrack / AVAudioEngine) @ 24 kHz | surowy `Uint8Array` PCM16 LE |
+**Bez** `@edkimmel/expo-audio-stream`. Wymagany Development Build.
 
-**Expo Go nie wystarczy** — wymagany jest Development Build (`expo-dev-client`).
+## JDK 17
 
-## Uruchomienie
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot"
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$env:Path = "$env:JAVA_HOME\bin;$env:ANDROID_HOME\platform-tools;$env:ANDROID_HOME\emulator;$env:Path"
+java -version   # 17.x
+```
 
-### 0. Backend (osobny terminal)
+## Clean rebuild
+
+```powershell
+cd mobile
+npm install
+
+# wyczyść natywny cache (po zmianie lokalnego modułu — obowiązkowe)
+Remove-Item -Recurse -Force android\.gradle, android\app\build, android\build -ErrorAction SilentlyContinue
+
+npx expo run:android
+```
+
+## Backend
 
 ```powershell
 cd backend
@@ -21,64 +37,4 @@ cd backend
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 1. Skonfiguruj adres WebSocket
-
-Edytuj `mobile/.env`:
-
-- **Emulator Android:** `EXPO_PUBLIC_WS_URL=ws://10.0.2.2:8000/ws/live`
-- **Telefon fizyczny (ta sama sieć Wi‑Fi):** `EXPO_PUBLIC_WS_URL=ws://<IP_TWOJEGO_PC>:8000/ws/live`  
-  (np. `ws://192.168.0.42:8000/ws/live`)
-
-### 2. Development Build (Android)
-
-Wymagane: Android Studio + SDK / emulator lub USB debugging.
-
-```powershell
-cd mobile
-npm install
-
-# Pierwszy build natywny (wygeneruje android/ i zainstaluje appkę)
-npx expo run:android
-```
-
-To samo co:
-
-```powershell
-npm run android
-```
-
-### 3. Kolejne uruchomienia (JS-only)
-
-Gdy native build już jest na urządzeniu:
-
-```powershell
-cd mobile
-npx expo start --dev-client
-```
-
-Otwórz appkę SafeHer na telefonie/emulatorze (nie Expo Go).
-
-### iOS (macOS)
-
-```powershell
-cd mobile
-npx expo run:ios
-```
-
-## Flow UI
-
-1. **Incoming** — dzwoni „Tomek”, zielona = odbierz, czerwona = odrzuć  
-2. **Active** — WS `session.init` + stream PCM, timer, Mute, Speaker (LOUDSPEAKER ↔ SILENT), czerwona = koniec  
-
-## Pliki
-
-```
-mobile/src/
-  FakeCallScreen.tsx
-  hooks/useLiveCall.ts
-  components/IncomingCallView.tsx
-  components/ActiveCallView.tsx
-  config.ts
-  protocol.ts
-  utils.ts
-```
+`.env` mobile: emulator `ws://10.0.2.2:8000/ws/live`, telefon `ws://<IP_PC>:8000/ws/live`.
