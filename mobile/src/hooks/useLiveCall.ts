@@ -1,37 +1,68 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Platform } from "react-native";
+import { PermissionsAndroid, Platform } from "react-native";
 import * as Location from "expo-location";
-import {
-  ExpoPlayAudioStream,
-  Pipeline,
-} from "@edkimmel/expo-audio-stream";
+import { SafeherAudio } from "safeher-audio";
 
 import {
   CONTACT_NAME,
   DEFAULT_MODE,
-  INPUT_SAMPLE_RATE,
-  MIC_INTERVAL_MS,
-  OUTPUT_SAMPLE_RATE,
   WS_URL,
 } from "../config";
 import type { AgentMode, ClientMessage, GeoLocation, ServerMessage } from "../protocol";
-import { base64ToUint8Array, uint8ArrayToBase64 } from "../utils";
+import { base64ToUint8Array } from "../utils";
 
 export type CallPhase = "incoming" | "connecting" | "active" | "ended";
 
-const FALLBACK_LOCATION: GeoLocation = {
-  lat: 52.2297,
-  lng: 21.0122,
-  accuracy_m: 50,
+export type SmsDraft = {
+  level: number;
+  body: string;
+  toLabel: string;
+  liveLocationLink?: string;
+  suspectOutfit?: string | null;
+  distanceOrBehavior?: string | null;
+  landmark?: string | null;
+  mode?: AgentMode;
 };
 
+/** Kraków centre — used so session.init never waits on GPS (esp. emulator). */
+const FALLBACK_LOCATION: GeoLocation = {
+  lat: 50.0614,
+  lng: 19.9372,
+  accuracy_m: 100,
+};
+
+const LOCATION_TIMEOUT_MS = 2000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("location_timeout")), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** Best-effort GPS; never hangs the call path longer than LOCATION_TIMEOUT_MS. */
 async function resolveLocation(): Promise<GeoLocation> {
   try {
-    const perm = await Location.requestForegroundPermissionsAsync();
+    const perm = await withTimeout(
+      Location.requestForegroundPermissionsAsync(),
+      LOCATION_TIMEOUT_MS,
+    );
     if (!perm.granted) return FALLBACK_LOCATION;
-    const pos = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.Balanced,
-    });
+    const pos = await withTimeout(
+      Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      }),
+      LOCATION_TIMEOUT_MS,
+    );
     return {
       lat: pos.coords.latitude,
       lng: pos.coords.longitude,
@@ -42,6 +73,20 @@ async function resolveLocation(): Promise<GeoLocation> {
   }
 }
 
+async function ensureMicPermission(): Promise<boolean> {
+  if (Platform.OS !== "android") return true;
+  const result = await PermissionsAndroid.request(
+    PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+    {
+      title: "Mikrofon SafeHer",
+      message: "SafeHer potrzebuje mikrofonu do rozmowy głosowej.",
+      buttonPositive: "OK",
+      buttonNegative: "Anuluj",
+    },
+  );
+  return result === PermissionsAndroid.RESULTS.GRANTED;
+}
+
 export function useLiveCall() {
   const [phase, setPhase] = useState<CallPhase>("incoming");
   const [mode, setMode] = useState<AgentMode>(DEFAULT_MODE);
@@ -49,10 +94,9 @@ export function useLiveCall() {
   const [elapsedSec, setElapsedSec] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [lastTranscript, setLastTranscript] = useState<string | null>(null);
+  const [smsDraft, setSmsDraft] = useState<SmsDraft | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const turnIdRef = useRef(`turn_${Date.now()}`);
-  const firstAudioRef = useRef(true);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const micSubRef = useRef<{ remove: () => void } | null>(null);
   const modeRef = useRef<AgentMode>(DEFAULT_MODE);
@@ -73,17 +117,21 @@ export function useLiveCall() {
     try {
       micSubRef.current?.remove();
       micSubRef.current = null;
-      await ExpoPlayAudioStream.stopMicrophone();
     } catch {
       // ignore
     }
     try {
-      await Pipeline.disconnect();
+      SafeherAudio.stopRecording();
     } catch {
       // ignore
     }
     try {
-      await ExpoPlayAudioStream.destroy();
+      SafeherAudio.stopPlayback();
+    } catch {
+      // ignore
+    }
+    try {
+      SafeherAudio.release();
     } catch {
       // ignore
     }
@@ -147,13 +195,13 @@ export function useLiveCall() {
         case "agent.transcript":
           setLastTranscript(`${msg.role}: ${msg.text}`);
           break;
-        case "audio.interrupted": {
-          const oldTurn = turnIdRef.current;
-          turnIdRef.current = `turn_${Date.now()}`;
-          firstAudioRef.current = true;
-          void Pipeline.invalidateTurn({ turnId: oldTurn });
+        case "audio.interrupted":
+          try {
+            SafeherAudio.flushPlayback();
+          } catch {
+            // ignore
+          }
           break;
-        }
         case "session.error":
           setError(msg.message);
           void hangUp();
@@ -162,8 +210,17 @@ export function useLiveCall() {
           void hangUp();
           break;
         case "tool.sms_payload":
-          // Stage 3 will wire expo-sms
-          console.log("[sms_payload]", msg.body);
+          setSmsDraft({
+            level: msg.level,
+            body: msg.body,
+            toLabel: msg.to_label,
+            liveLocationLink: msg.meta?.live_location_link,
+            suspectOutfit: msg.meta?.suspect_outfit,
+            distanceOrBehavior: msg.meta?.distance_or_behavior,
+            landmark: msg.meta?.landmark,
+            mode: msg.meta?.mode,
+          });
+          console.log("[sms_payload]", msg.body, msg.meta);
           break;
         default:
           break;
@@ -172,33 +229,27 @@ export function useLiveCall() {
     [clearTimer, hangUp],
   );
 
-  const startAudioPipeline = useCallback(async (ws: WebSocket) => {
-    const micPerm = await ExpoPlayAudioStream.requestPermissionsAsync();
-    if (!micPerm.granted) {
+  const startLocalAudio = useCallback(async (ws: WebSocket) => {
+    const granted = await ensureMicPermission();
+    if (!granted) {
       throw new Error("Brak uprawnień do mikrofonu");
     }
 
-    await Pipeline.connect({
-      sampleRate: OUTPUT_SAMPLE_RATE,
-      channelCount: 1,
-      targetBufferMs: 60,
-      playbackMode: "conversation",
-      audioMode: "doNotMix",
-    });
+    SafeherAudio.startPlayback();
 
-    const { subscription } = await ExpoPlayAudioStream.startMicrophone({
-      sampleRate: INPUT_SAMPLE_RATE,
-      channels: 1,
-      encoding: "pcm_16bit",
-      interval: MIC_INTERVAL_MS,
-      onAudioStream: async (event) => {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        if (typeof event.data !== "string") return;
+    micSubRef.current?.remove();
+    micSubRef.current = SafeherAudio.addAudioChunkListener((event) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (!event?.data) return;
+      try {
         const pcm = base64ToUint8Array(event.data);
         ws.send(pcm);
-      },
+      } catch (err) {
+        console.warn("[safeher-audio] mic chunk failed", err);
+      }
     });
-    micSubRef.current = subscription ?? null;
+
+    SafeherAudio.startRecording();
   }, []);
 
   const answer = useCallback(async () => {
@@ -206,11 +257,10 @@ export function useLiveCall() {
     endedRef.current = false;
     setError(null);
     setPhase("connecting");
-    firstAudioRef.current = true;
-    turnIdRef.current = `turn_${Date.now()}`;
 
     try {
-      const location = await resolveLocation();
+      // Never block WS on GPS — init with Kraków fallback, refine in background.
+      const location = FALLBACK_LOCATION;
       const ws = new WebSocket(WS_URL);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
@@ -239,12 +289,11 @@ export function useLiveCall() {
           event.data instanceof ArrayBuffer
             ? new Uint8Array(event.data)
             : new Uint8Array(event.data as ArrayBuffer);
-        Pipeline.pushAudioSync({
-          audio: uint8ArrayToBase64(buffer),
-          turnId: turnIdRef.current,
-          isFirstChunk: firstAudioRef.current,
-        });
-        firstAudioRef.current = false;
+        try {
+          SafeherAudio.writePlaybackBytes(buffer);
+        } catch (err) {
+          console.warn("[safeher-audio] playback write failed", err);
+        }
       };
 
       ws.onclose = () => {
@@ -253,7 +302,7 @@ export function useLiveCall() {
         }
       };
 
-      await startAudioPipeline(ws);
+      await startLocalAudio(ws);
 
       const init: ClientMessage = {
         type: "session.init",
@@ -267,6 +316,19 @@ export function useLiveCall() {
         },
       };
       ws.send(JSON.stringify(init));
+
+      // Best-effort real GPS after the call is already up.
+      void (async () => {
+        const fresh = await resolveLocation();
+        if (endedRef.current) return;
+        if (
+          fresh.lat === FALLBACK_LOCATION.lat &&
+          fresh.lng === FALLBACK_LOCATION.lng
+        ) {
+          return;
+        }
+        sendJson({ type: "session.update_location", location: fresh });
+      })();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -274,13 +336,21 @@ export function useLiveCall() {
       await teardownAudio();
       setPhase("incoming");
     }
-  }, [phase, handleServerMessage, hangUp, startAudioPipeline, closeSocket, teardownAudio]);
+  }, [
+    phase,
+    handleServerMessage,
+    hangUp,
+    startLocalAudio,
+    closeSocket,
+    teardownAudio,
+    sendJson,
+  ]);
 
   const toggleMute = useCallback(() => {
     setMuted((prev) => {
       const next = !prev;
       try {
-        ExpoPlayAudioStream.toggleSilence(next);
+        SafeherAudio.setMuted(next);
       } catch {
         // ignore
       }
@@ -313,6 +383,7 @@ export function useLiveCall() {
     elapsedSec,
     error,
     lastTranscript,
+    smsDraft,
     contactName: CONTACT_NAME,
     answer,
     decline,

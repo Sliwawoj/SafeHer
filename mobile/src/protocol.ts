@@ -59,7 +59,14 @@ export type ServerMessage =
       level: AlertLevel;
       to_label: string;
       body: string;
-      meta?: { mode?: AgentMode; summary?: string };
+      meta?: {
+        mode?: AgentMode;
+        summary?: string | null;
+        live_location_link?: string;
+        suspect_outfit?: string | null;
+        distance_or_behavior?: string | null;
+        landmark?: string | null;
+      };
     }
   | { type: "session.error"; code: string; message: string }
   | { type: "session.ended"; reason: string }
