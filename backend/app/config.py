@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     audio_output_encoding: str = "pcm16"
 
     overpass_url: str = "https://overpass-api.de/api/interpreter"
-    safe_haven_radius_m: int = 800
+    safe_haven_radius_m: int = 600
     cors_origins: str = "*"
 
 

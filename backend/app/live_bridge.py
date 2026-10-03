@@ -1,4 +1,4 @@
-"""Gemini Live session bridge: client WebSocket ↔ Gemini Live PCM."""
+"""Gemini Live session bridge: client WebSocket ↔ Gemini Live PCM + tools."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from google.genai import types
 from starlette.websockets import WebSocketState
 
 from .config import Settings
-from .prompts import build_system_instruction, mode_switch_hint
+from .overpass import get_nearby_safe_havens
+from .prompts import build_system_instruction, mode_switch_hint, pickup_nudge
 from .protocol import (
     AlertTrigger,
     SessionEnd,
@@ -31,6 +32,52 @@ from .protocol import (
 )
 
 logger = logging.getLogger("safeher.live")
+
+
+def _live_tools() -> list[types.Tool]:
+    find_safe_haven = types.FunctionDeclaration(
+        name="find_safe_haven",
+        description=(
+            "Znajdź najbliższe otwarte/oświetlone bezpieczne miejsca "
+            "(stacja paliw, apteka, sklep, posterunek) względem aktualnej "
+            "pozycji GPS użytkowniczki. Zwraca 0–3 punkty z dystansem i kierunkiem."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={},
+        ),
+    )
+    update_threat_info = types.FunctionDeclaration(
+        name="update_threat_info",
+        description=(
+            "Zapisz w tle ustalone szczegóły sytuacji do treści SMS (tryb SILENT). "
+            "Wywołuj tylko z polami, które faktycznie udało się ustalić z rozmowy. "
+            "W trybie LOUDSPEAKER nie używaj tego narzędzia."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "suspect_outfit": types.Schema(
+                    type=types.Type.STRING,
+                    description="Opis ubioru podejrzanej osoby, jeśli ustalony.",
+                    nullable=True,
+                ),
+                "distance_or_behavior": types.Schema(
+                    type=types.Type.STRING,
+                    description="Dystans lub zachowanie osoby, jeśli ustalone.",
+                    nullable=True,
+                ),
+                "landmark": types.Schema(
+                    type=types.Type.STRING,
+                    description="Punkt orientacyjny / landmark, jeśli ustalony.",
+                    nullable=True,
+                ),
+            },
+        ),
+    )
+    return [
+        types.Tool(function_declarations=[find_safe_haven, update_threat_info]),
+    ]
 
 
 class LiveBridge:
@@ -110,6 +157,7 @@ class LiveBridge:
             system_instruction=system_instruction,
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            tools=_live_tools(),
         )
 
         try:
@@ -135,13 +183,7 @@ class LiveBridge:
                     self._pump_gemini_to_client(session),
                     name="gemini_to_client",
                 )
-                # After pumps are live, nudge Gemini to greet (phone pickup).
-                await session.send_realtime_input(
-                    text=(
-                        "Połączenie właśnie odebrane. "
-                        "Przywitaj się krótko i naturalnie jak bliska osoba."
-                    )
-                )
+                await session.send_realtime_input(text=pickup_nudge(init.mode))
                 done, pending = await asyncio.wait(
                     {client_task, gemini_task},
                     return_when=asyncio.FIRST_COMPLETED,
@@ -200,6 +242,10 @@ class LiveBridge:
                     if self._stop.is_set():
                         return
 
+                    if response.tool_call:
+                        await self._handle_tool_call(session, response.tool_call)
+                        continue
+
                     server_content = response.server_content
                     if server_content and server_content.interrupted:
                         await self._safe_send_json(audio_interrupted_payload())
@@ -218,6 +264,100 @@ class LiveBridge:
             if not self._stop.is_set():
                 self._stop.set()
                 raise
+
+    async def _handle_tool_call(self, session: Any, tool_call: Any) -> None:
+        assert self.state is not None
+        calls = getattr(tool_call, "function_calls", None) or []
+        responses: list[types.FunctionResponse] = []
+        for fc in calls:
+            name = fc.name or ""
+            args = dict(fc.args or {})
+            logger.info(
+                "tool_call session_id=%s name=%s args=%s",
+                self.state.session_id,
+                name,
+                args,
+            )
+            try:
+                result = await self._dispatch_tool(name, args)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("tool %s failed", name)
+                result = {"ok": False, "error": str(exc)}
+            responses.append(
+                types.FunctionResponse(
+                    id=fc.id,
+                    name=name,
+                    response=result,
+                )
+            )
+        if responses:
+            await session.send_tool_response(function_responses=responses)
+
+    async def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        assert self.state is not None
+        if name == "find_safe_haven":
+            return await self._tool_find_safe_haven()
+        if name == "update_threat_info":
+            return await self._tool_update_threat_info(args)
+        return {"ok": False, "error": f"unknown_tool:{name}"}
+
+    async def _tool_find_safe_haven(self) -> dict[str, Any]:
+        assert self.state is not None
+        loc = self.state.location
+        if loc is None:
+            return {"ok": True, "places": [], "note": "brak lokalizacji GPS"}
+        places = await get_nearby_safe_havens(
+            loc.lat,
+            loc.lng,
+            radius=self.settings.safe_haven_radius_m,
+            overpass_url=self.settings.overpass_url,
+        )
+        logger.info(
+            "find_safe_haven session_id=%s count=%s",
+            self.state.session_id,
+            len(places),
+        )
+        return {"ok": True, "places": places}
+
+    async def _tool_update_threat_info(self, args: dict[str, Any]) -> dict[str, Any]:
+        assert self.state is not None
+        outfit = _optional_str(args.get("suspect_outfit"))
+        distance = _optional_str(args.get("distance_or_behavior"))
+        landmark = _optional_str(args.get("landmark"))
+
+        if not any((outfit, distance, landmark)):
+            return {"ok": False, "error": "no_fields"}
+
+        if self.state.mode == "LOUDSPEAKER":
+            # Spec: loudspeaker does not collect SMS details.
+            return {
+                "ok": False,
+                "error": "loudspeaker_no_threat_collection",
+            }
+
+        self.state.threat = self.state.threat.merge(
+            suspect_outfit=outfit,
+            distance_or_behavior=distance,
+            landmark=landmark,
+        )
+        payload = sms_payload(
+            level=1,
+            mode=self.state.mode,
+            location=self.state.location,
+            summary=self.state.last_summary,
+            threat=self.state.threat,
+        )
+        self.state.last_sms_body = payload["body"]
+        await self._safe_send_json(payload)
+        logger.info(
+            "update_threat_info session_id=%s threat=%s",
+            self.state.session_id,
+            self.state.threat.model_dump(),
+        )
+        return {
+            "ok": True,
+            "saved": self.state.threat.model_dump(exclude_none=True),
+        }
 
     async def _forward_transcriptions(self, server_content: Any) -> None:
         assert self.state is not None
@@ -259,14 +399,15 @@ class LiveBridge:
 
         if msg_type == "alert.trigger":
             alert = AlertTrigger.model_validate(payload)
-            await self._safe_send_json(
-                sms_payload(
-                    level=alert.level,
-                    mode=self.state.mode,
-                    location=self.state.location,
-                    summary=self.state.last_summary,
-                )
+            sms = sms_payload(
+                level=alert.level,
+                mode=self.state.mode,
+                location=self.state.location,
+                summary=self.state.last_summary,
+                threat=self.state.threat,
             )
+            self.state.last_sms_body = sms["body"]
+            await self._safe_send_json(sms)
             return False
 
         if msg_type == "session.end":
@@ -303,3 +444,10 @@ class LiveBridge:
                 await self.ws.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

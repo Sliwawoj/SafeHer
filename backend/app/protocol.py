@@ -16,6 +16,38 @@ class GeoLocation(BaseModel):
     accuracy_m: float | None = None
 
 
+class ThreatInfo(BaseModel):
+    suspect_outfit: str | None = None
+    distance_or_behavior: str | None = None
+    landmark: str | None = None
+
+    def merge(
+        self,
+        *,
+        suspect_outfit: str | None = None,
+        distance_or_behavior: str | None = None,
+        landmark: str | None = None,
+    ) -> ThreatInfo:
+        return ThreatInfo(
+            suspect_outfit=suspect_outfit or self.suspect_outfit,
+            distance_or_behavior=distance_or_behavior or self.distance_or_behavior,
+            landmark=landmark or self.landmark,
+        )
+
+    def as_summary_parts(self) -> list[str]:
+        parts: list[str] = []
+        if self.suspect_outfit:
+            parts.append(f"Ubiór: {self.suspect_outfit}")
+        if self.distance_or_behavior:
+            parts.append(f"Zachowanie/dystans: {self.distance_or_behavior}")
+        if self.landmark:
+            parts.append(f"Punkt: {self.landmark}")
+        return parts
+
+    def has_any(self) -> bool:
+        return bool(self.suspect_outfit or self.distance_or_behavior or self.landmark)
+
+
 class SessionInit(BaseModel):
     type: Literal["session.init"] = "session.init"
     mode: AgentMode = "LOUDSPEAKER"
@@ -79,16 +111,29 @@ def audio_interrupted_payload() -> dict[str, Any]:
     return {"type": "audio.interrupted"}
 
 
+def _live_location_link(location: GeoLocation | None) -> str:
+    if location is None:
+        return ""
+    return f"https://maps.google.com/?q={location.lat},{location.lng}"
+
+
 def sms_payload(
     *,
     level: int,
     mode: str,
     location: GeoLocation | None,
     summary: str | None = None,
+    threat: ThreatInfo | None = None,
 ) -> dict[str, Any]:
-    maps = ""
-    if location is not None:
-        maps = f"https://maps.google.com/?q={location.lat},{location.lng}"
+    maps = _live_location_link(location)
+    mode_key = (mode or "LOUDSPEAKER").upper()
+    threat = threat or ThreatInfo()
+    threat_parts = threat.as_summary_parts()
+    threat_meta = {
+        "suspect_outfit": threat.suspect_outfit,
+        "distance_or_behavior": threat.distance_or_behavior,
+        "landmark": threat.landmark,
+    }
 
     if level >= 3:
         body = (
@@ -100,25 +145,36 @@ def sms_payload(
             "POTRZEBNA PILNA POMOC! Zadzwoń pod 112 lub natychmiast do mnie. "
             f"Moja aktualna pozycja: {maps}"
         )
-    else:
-        mode_pl = (
-            "głośnomówiącym"
-            if (mode or "").upper() == "LOUDSPEAKER"
-            else "cichym"
-        )
+        if threat_parts:
+            body = f"{body}\n" + " | ".join(threat_parts)
+    elif mode_key == "LOUDSPEAKER":
+        # Fixed loudspeaker template — no discrete threat extraction.
         body = (
-            f"Rozmawiam w trybie {mode_pl}, aby odstraszyć osobę w pobliżu. "
+            "Rozmawiam w trybie głośnomówiącym, aby odstraszyć osobę w pobliżu. "
             f"Śledź moją lokalizację: {maps}"
         )
-        if summary:
-            body = f"{body}\nPodsumowanie: {summary}"
+    else:
+        body = (
+            "Rozmawiam w trybie cichym. "
+            f"Śledź moją lokalizację: {maps}"
+        )
+        details: list[str] = list(threat_parts)
+        if summary and summary not in details:
+            details.append(summary)
+        if details:
+            body = f"{body}\nSzczegóły: " + " | ".join(details)
 
     return {
         "type": "tool.sms_payload",
         "level": level,
         "to_label": "trusted_contact",
         "body": body,
-        "meta": {"mode": mode, "summary": summary},
+        "meta": {
+            "mode": mode_key,
+            "summary": summary,
+            "live_location_link": maps,
+            **threat_meta,
+        },
     }
 
 
@@ -129,3 +185,5 @@ class SessionState(BaseModel):
     locale: str = "pl-PL"
     contact_name: str | None = None
     last_summary: str | None = Field(default=None)
+    threat: ThreatInfo = Field(default_factory=ThreatInfo)
+    last_sms_body: str | None = Field(default=None)
