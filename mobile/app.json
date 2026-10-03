@@ -1,0 +1,59 @@
+{
+  "expo": {
+    "name": "SafeHer",
+    "slug": "safeher",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "scheme": "safeher",
+    "plugins": [
+      "expo-dev-client",
+      [
+        "@edkimmel/expo-audio-stream",
+        {
+          "microphonePermission": "SafeHer potrzebuje mikrofonu do dyskretnej rozmowy głosowej w czasie rzeczywistym."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "SafeHer używa lokalizacji, aby kierować Cię do bezpiecznych miejsc w pobliżu."
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.safeher.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "SafeHer potrzebuje mikrofonu do dyskretnej rozmowy głosowej w czasie rzeczywistym.",
+        "NSLocationWhenInUseUsageDescription": "SafeHer używa lokalizacji, aby kierować Cię do bezpiecznych miejsc w pobliżu.",
+        "NSLocalNetworkUsageDescription": "SafeHer łączy się z lokalnym backendem audio podczas developmentu.",
+        "UIBackgroundModes": ["audio"]
+      }
+    },
+    "android": {
+      "package": "com.safeher.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B1220",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.FOREGROUND_SERVICE"
+      ],
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
