@@ -167,8 +167,9 @@ class LiveBridge:
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=system_instruction,
-            input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
+            # Skip live STT — dialer doesn't need realtime transcripts; cuts audio loop latency.
+            input_audio_transcription=None,
+            output_audio_transcription=None,
             tools=_live_tools(),
         )
 
@@ -435,19 +436,24 @@ class LiveBridge:
         }
 
     async def _forward_transcriptions(self, server_content: Any) -> None:
-        assert self.state is not None
-        inp = getattr(server_content, "input_transcription", None)
-        if inp and getattr(inp, "text", None):
-            text = inp.text.strip()
-            if text:
-                self.state.last_summary = text
-                await self._safe_send_json(transcript_payload("user", text))
+        """Best-effort; transcription may be disabled in LiveConnectConfig."""
+        if server_content is None or self.state is None:
+            return
+        try:
+            inp = getattr(server_content, "input_transcription", None)
+            if inp and getattr(inp, "text", None):
+                text = str(inp.text).strip()
+                if text:
+                    self.state.last_summary = text
+                    await self._safe_send_json(transcript_payload("user", text))
 
-        out = getattr(server_content, "output_transcription", None)
-        if out and getattr(out, "text", None):
-            text = out.text.strip()
-            if text:
-                await self._safe_send_json(transcript_payload("assistant", text))
+            out = getattr(server_content, "output_transcription", None)
+            if out and getattr(out, "text", None):
+                text = str(out.text).strip()
+                if text:
+                    await self._safe_send_json(transcript_payload("assistant", text))
+        except Exception:  # noqa: BLE001 — never break the audio pump
+            logger.debug("transcription forward skipped", exc_info=True)
 
     async def _handle_control(self, session: Any, raw: str) -> bool:
         """Return True when the live session should end."""
