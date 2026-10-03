@@ -4,6 +4,7 @@ type Props = {
   contactName: string;
   onAnswer: () => void;
   onDecline: () => void;
+  onOpenSettings?: () => void;
   busy?: boolean;
   error?: string | null;
 };
@@ -12,6 +13,7 @@ export function IncomingCallView({
   contactName,
   onAnswer,
   onDecline,
+  onOpenSettings,
   busy,
   error,
 }: Props) {
@@ -19,6 +21,17 @@ export function IncomingCallView({
 
   return (
     <View style={styles.root}>
+      {onOpenSettings ? (
+        <Pressable
+          accessibilityLabel="Ustawienia"
+          onPress={onOpenSettings}
+          hitSlop={12}
+          style={styles.gear}
+        >
+          <Text style={styles.gearText}>⚙</Text>
+        </Pressable>
+      ) : null}
+
       <Text style={styles.label}>Połączenie przychodzące…</Text>
       <View style={styles.avatar}>
         <Text style={styles.avatarText}>{initial}</Text>
@@ -77,6 +90,21 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 28,
     backgroundColor: "#0B1220",
+  },
+  gear: {
+    position: "absolute",
+    top: 54,
+    right: 22,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  gearText: {
+    color: "rgba(255,255,255,0.45)",
+    fontSize: 18,
   },
   label: {
     color: "rgba(255,255,255,0.65)",

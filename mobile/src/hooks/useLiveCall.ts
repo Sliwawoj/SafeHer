@@ -3,12 +3,9 @@ import { PermissionsAndroid, Platform } from "react-native";
 import * as Location from "expo-location";
 import { SafeherAudio } from "safeher-audio";
 
-import {
-  CONTACT_NAME,
-  DEFAULT_MODE,
-  WS_URL,
-} from "../config";
+import { DEFAULT_MODE, WS_URL } from "../config";
 import type { AgentMode, ClientMessage, GeoLocation, ServerMessage } from "../protocol";
+import { composeAlertSms, sendAlertSms } from "../services/smsAlerts";
 import { base64ToUint8Array } from "../utils";
 
 export type CallPhase = "incoming" | "connecting" | "active" | "ended";
@@ -49,7 +46,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-/** Best-effort GPS; never hangs the call path longer than LOCATION_TIMEOUT_MS. */
 async function resolveLocation(): Promise<GeoLocation> {
   try {
     const perm = await withTimeout(
@@ -87,7 +83,12 @@ async function ensureMicPermission(): Promise<boolean> {
   return result === PermissionsAndroid.RESULTS.GRANTED;
 }
 
-export function useLiveCall() {
+type UseLiveCallOptions = {
+  contactName: string;
+  trustedPhone: string;
+};
+
+export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
   const [phase, setPhase] = useState<CallPhase>("incoming");
   const [mode, setMode] = useState<AgentMode>(DEFAULT_MODE);
   const [muted, setMuted] = useState(false);
@@ -95,16 +96,35 @@ export function useLiveCall() {
   const [error, setError] = useState<string | null>(null);
   const [lastTranscript, setLastTranscript] = useState<string | null>(null);
   const [smsDraft, setSmsDraft] = useState<SmsDraft | null>(null);
+  const [alertLevel, setAlertLevel] = useState<0 | 1 | 2>(0);
+  const [smsStatus, setSmsStatus] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const micSubRef = useRef<{ remove: () => void } | null>(null);
   const modeRef = useRef<AgentMode>(DEFAULT_MODE);
   const endedRef = useRef(false);
+  const locationRef = useRef<GeoLocation>(FALLBACK_LOCATION);
+  const smsDraftRef = useRef<SmsDraft | null>(null);
+  const alertLevelRef = useRef<0 | 1 | 2>(0);
+  const contactNameRef = useRef(contactName);
+  const trustedPhoneRef = useRef(trustedPhone);
 
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  useEffect(() => {
+    smsDraftRef.current = smsDraft;
+  }, [smsDraft]);
+
+  useEffect(() => {
+    contactNameRef.current = contactName;
+  }, [contactName]);
+
+  useEffect(() => {
+    trustedPhoneRef.current = trustedPhone;
+  }, [trustedPhone]);
 
   const clearTimer = useCallback(() => {
     if (timerRef.current) {
@@ -174,6 +194,44 @@ export function useLiveCall() {
     setPhase("ended");
   }, [clearTimer, closeSocket, teardownAudio]);
 
+  const dispatchSms = useCallback(
+    async (kind: "level1" | "level2" | "pin_fail") => {
+      const body = composeAlertSms({
+        kind,
+        mode: modeRef.current,
+        location: locationRef.current,
+        smsDraft: smsDraftRef.current,
+      });
+      const result = await sendAlertSms(trustedPhoneRef.current, body);
+      setSmsStatus(`${kind}:${result}`);
+      console.log("[sms]", kind, result, body);
+      return result;
+    },
+    [],
+  );
+
+  const triggerAlert = useCallback(async () => {
+    if (phase !== "connecting" && phase !== "active") return;
+    const current = alertLevelRef.current;
+    if (current >= 2) return;
+
+    const next = (current === 0 ? 1 : 2) as 1 | 2;
+    alertLevelRef.current = next;
+    setAlertLevel(next);
+
+    sendJson({
+      type: "alert.trigger",
+      level: next,
+      reason: "manual",
+    });
+
+    await dispatchSms(next === 1 ? "level1" : "level2");
+  }, [phase, sendJson, dispatchSms]);
+
+  const sendPinFailAlert = useCallback(async () => {
+    await dispatchSms("pin_fail");
+  }, [dispatchSms]);
+
   const handleServerMessage = useCallback(
     (raw: string) => {
       let msg: ServerMessage;
@@ -220,7 +278,6 @@ export function useLiveCall() {
             landmark: msg.meta?.landmark,
             mode: msg.meta?.mode,
           });
-          console.log("[sms_payload]", msg.body, msg.meta);
           break;
         default:
           break;
@@ -255,12 +312,15 @@ export function useLiveCall() {
   const answer = useCallback(async () => {
     if (phase !== "incoming") return;
     endedRef.current = false;
+    alertLevelRef.current = 0;
+    setAlertLevel(0);
+    setSmsStatus(null);
     setError(null);
     setPhase("connecting");
 
     try {
-      // Never block WS on GPS — init with Kraków fallback, refine in background.
       const location = FALLBACK_LOCATION;
+      locationRef.current = location;
       const ws = new WebSocket(WS_URL);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
@@ -309,7 +369,7 @@ export function useLiveCall() {
         mode: modeRef.current,
         location,
         locale: "pl-PL",
-        contact_name: CONTACT_NAME,
+        contact_name: contactNameRef.current,
         client: {
           platform: Platform.OS,
           app_version: "0.1.0",
@@ -317,10 +377,10 @@ export function useLiveCall() {
       };
       ws.send(JSON.stringify(init));
 
-      // Best-effort real GPS after the call is already up.
       void (async () => {
         const fresh = await resolveLocation();
         if (endedRef.current) return;
+        locationRef.current = fresh;
         if (
           fresh.lat === FALLBACK_LOCATION.lat &&
           fresh.lng === FALLBACK_LOCATION.lng
@@ -384,10 +444,14 @@ export function useLiveCall() {
     error,
     lastTranscript,
     smsDraft,
-    contactName: CONTACT_NAME,
+    smsStatus,
+    alertLevel,
+    contactName,
     answer,
     decline,
     hangUp,
+    triggerAlert,
+    sendPinFailAlert,
     toggleMute,
     toggleSpeakerMode,
   };

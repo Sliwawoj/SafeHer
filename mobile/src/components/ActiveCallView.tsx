@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import type { AgentMode } from "../protocol";
@@ -9,10 +10,14 @@ type Props = {
   mode: AgentMode;
   muted: boolean;
   connecting?: boolean;
+  alertLevel?: 0 | 1 | 2;
   onToggleMute: () => void;
   onToggleSpeaker: () => void;
   onHangUp: () => void;
+  onSecretTrigger: () => void;
 };
+
+const TAP_WINDOW_MS = 900;
 
 export function ActiveCallView({
   contactName,
@@ -20,25 +25,52 @@ export function ActiveCallView({
   mode,
   muted,
   connecting,
+  alertLevel = 0,
   onToggleMute,
   onToggleSpeaker,
   onHangUp,
+  onSecretTrigger,
 }: Props) {
   const initial = contactName.trim().charAt(0).toUpperCase() || "T";
   const speakerOn = mode === "LOUDSPEAKER";
+  const tapsRef = useRef({ count: 0, lastAt: 0 });
+
+  const handleIdentityTap = () => {
+    const now = Date.now();
+    const taps = tapsRef.current;
+    if (now - taps.lastAt > TAP_WINDOW_MS) {
+      taps.count = 0;
+    }
+    taps.lastAt = now;
+    taps.count += 1;
+    if (taps.count >= 3) {
+      taps.count = 0;
+      onSecretTrigger();
+    }
+  };
 
   return (
     <View style={styles.root}>
       <Text style={styles.label}>
         {connecting ? "Łączenie…" : "Połączenie SafeHer"}
       </Text>
-      <View style={styles.avatar}>
-        <Text style={styles.avatarText}>{initial}</Text>
-      </View>
-      <Text style={styles.name}>{contactName}</Text>
+
+      <Pressable onPress={handleIdentityTap} style={styles.identity}>
+        <View style={styles.avatar}>
+          <Text style={styles.avatarText}>{initial}</Text>
+        </View>
+        <Text style={styles.name}>{contactName}</Text>
+      </Pressable>
+
       <Text style={styles.timer}>
         {connecting ? "00:00" : formatCallDuration(elapsedSec)}
       </Text>
+
+      {alertLevel > 0 ? (
+        <Text style={styles.alertHint}>
+          {alertLevel === 1 ? "Alert L1 wysłany" : "Alert L2 (eskalacja) wysłany"}
+        </Text>
+      ) : null}
 
       <View style={styles.controls}>
         <ControlButton
@@ -114,6 +146,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 28,
   },
+  identity: {
+    alignItems: "center",
+  },
   avatar: {
     width: 110,
     height: 110,
@@ -138,6 +173,11 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.75)",
     fontSize: 20,
     fontVariant: ["tabular-nums"],
+  },
+  alertHint: {
+    marginTop: 10,
+    color: "rgba(255,180,120,0.85)",
+    fontSize: 12,
   },
   controls: {
     marginTop: 64,
