@@ -66,7 +66,11 @@ export type ServerMessage =
       body: string;
       meta?: {
         mode?: AgentMode;
-        summary?: string;
+        summary?: string | null;
+        live_location_link?: string;
+        suspect_outfit?: string | null;
+        distance_or_behavior?: string | null;
+        landmark?: string | null;
       };
     }
   | { type: "session.error"; code: string; message: string }

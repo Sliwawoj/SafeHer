@@ -133,8 +133,12 @@ Structured data for `expo-sms` (device sends SMS natively).
   "to_label": "trusted_contact",
   "body": "Rozmawiam w trybie głośnomówiącym... Śledź lokalizację: https://maps.google.com/?q=52.23,21.01",
   "meta": {
-    "mode": "LOUDSPEAKER",
-    "summary": "Facet w czarnej kurtce z kapturem, kierunek park"
+    "mode": "SILENT",
+    "summary": "Facet w czarnej kurtce z kapturem",
+    "live_location_link": "https://maps.google.com/?q=50.06,19.93",
+    "suspect_outfit": "czarna bluza z kapturem",
+    "distance_or_behavior": "kilka kroków za mną",
+    "landmark": "Żabka na rogu"
   }
 }
 ```
