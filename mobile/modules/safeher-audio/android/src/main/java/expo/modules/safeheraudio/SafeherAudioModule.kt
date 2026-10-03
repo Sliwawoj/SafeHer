@@ -21,8 +21,11 @@ class SafeherAudioModule : Module() {
     private const val CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
     private const val CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
     private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
-    // ~40 ms @ 16 kHz mono int16
+    // Chunk size sent to JS/WS: 1280 B = 640 samples = 40 ms @ 16 kHz PCM16 mono.
+    // Keep reads small so Gemini VAD sees end-of-speech promptly.
     private const val READ_BYTES = 1280
+    // AudioRecord ring buffer: at least 2 chunks, never oversized beyond ~64 ms * 8.
+    private const val RING_CHUNKS = 2
   }
 
   private var recorder: AudioRecord? = null
@@ -148,7 +151,7 @@ class SafeherAudioModule : Module() {
     if (recording.get()) return
 
     val minBuf = AudioRecord.getMinBufferSize(INPUT_RATE, CHANNEL_IN, ENCODING)
-    val bufSize = minBuf.coerceAtLeast(READ_BYTES * 4)
+    val bufSize = minBuf.coerceAtLeast(READ_BYTES * RING_CHUNKS)
 
     val created = AudioRecord(
       MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -169,10 +172,11 @@ class SafeherAudioModule : Module() {
 
     recordThread = Thread({
       Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+      // Fixed small reads (~40 ms) regardless of ring buffer size.
       val buffer = ByteArray(READ_BYTES)
       while (recording.get()) {
         val rec = recorder ?: break
-        val n = rec.read(buffer, 0, buffer.size)
+        val n = rec.read(buffer, 0, READ_BYTES)
         if (n <= 0) continue
 
         val payload = if (muted.get()) {
@@ -193,7 +197,7 @@ class SafeherAudioModule : Module() {
     }, "SafeherAudioRecord")
 
     recordThread?.start()
-    Log.i(TAG, "recording started @ ${INPUT_RATE}Hz")
+    Log.i(TAG, "recording started @ ${INPUT_RATE}Hz read=$READ_BYTES ring=$bufSize")
   }
 
   private fun stopRecordingInternal() {
