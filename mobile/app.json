@@ -10,6 +10,7 @@
     "scheme": "safeher",
     "plugins": [
       "expo-dev-client",
+      "./plugins/with-safeher-lockscreen",
       [
         "expo-location",
         {
@@ -30,7 +31,7 @@
     "android": {
       "package": "com.safeher.app",
       "adaptiveIcon": {
-        "backgroundColor": "#0B1220",
+        "backgroundColor": "#5C2A7A",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -41,7 +42,15 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.INTERNET",
-        "android.permission.ACCESS_NETWORK_STATE"
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.VIBRATE",
+        "android.permission.WAKE_LOCK",
+        "android.permission.USE_FULL_SCREEN_INTENT",
+        "android.permission.SEND_SMS",
+        "android.permission.READ_PHONE_STATE"
       ],
       "predictiveBackGestureEnabled": false
     },

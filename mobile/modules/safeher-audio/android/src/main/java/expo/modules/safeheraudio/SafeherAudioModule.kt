@@ -1,14 +1,19 @@
 package expo.modules.safeheraudio
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.telephony.SmsManager
 import android.util.Base64
 import android.util.Log
+import androidx.core.content.ContextCompat
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.util.concurrent.atomic.AtomicBoolean
@@ -33,11 +38,23 @@ class SafeherAudioModule : Module() {
   private var recordThread: Thread? = null
   private val recording = AtomicBoolean(false)
   private val muted = AtomicBoolean(false)
+  private val playbackPaused = AtomicBoolean(false)
 
   override fun definition() = ModuleDefinition {
     Name("SafeherAudio")
 
-    Events("onAudioChunk")
+    Events(
+      "onAudioChunk",
+      "onFakeCallArmed",
+      "onFakeCallCancelled",
+      "onFakeCallFire",
+    )
+
+    OnCreate {
+      FakeCallBridge.emitEvent = { name, body ->
+        sendEvent(name, body)
+      }
+    }
 
     Function("startPlayback") {
       startPlaybackInternal()
@@ -51,13 +68,35 @@ class SafeherAudioModule : Module() {
       writePlaybackInternal(base64)
     }
 
+    Function("writePlaybackPcm") { data: ByteArray ->
+      writePlaybackPcmInternal(data)
+    }
+
     Function("flushPlayback") {
       try {
         track?.pause()
         track?.flush()
-        track?.play()
+        if (!playbackPaused.get()) {
+          track?.play()
+        }
       } catch (e: Exception) {
         Log.w(TAG, "flushPlayback failed", e)
+      }
+    }
+
+    Function("setPlaybackPaused") { value: Boolean ->
+      playbackPaused.set(value)
+      try {
+        if (value) {
+          track?.pause()
+          track?.flush()
+          Log.i(TAG, "playback paused")
+        } else if (track != null) {
+          track?.play()
+          Log.i(TAG, "playback resumed")
+        }
+      } catch (e: Exception) {
+        Log.w(TAG, "setPlaybackPaused failed", e)
       }
     }
 
@@ -74,14 +113,195 @@ class SafeherAudioModule : Module() {
     }
 
     Function("release") {
+      playbackPaused.set(false)
       stopRecordingInternal()
       stopPlaybackInternal()
     }
 
+    Function("startFakeCallGuard") {
+      val ctx = appContext.reactContext
+      if (ctx != null) {
+        FakeCallGuardService.start(ctx)
+      }
+      null
+    }
+
+    Function("stopFakeCallGuard") {
+      val ctx = appContext.reactContext
+      if (ctx != null) {
+        FakeCallGuardService.stop(ctx)
+      }
+      null
+    }
+
+    Function("cancelArmedFakeCall") {
+      val ctx = appContext.reactContext
+      if (ctx != null) {
+        FakeCallGuardService.cancelArmed(ctx)
+      }
+      null
+    }
+
+    Function("stopIncomingCallAlert") {
+      val ctx = appContext.reactContext
+      if (ctx != null) {
+        FakeCallGuardService.stopRing(ctx)
+      }
+      null
+    }
+
+    Function("isFakeCallArmed") {
+      FakeCallGuardService.isArmed
+    }
+
+    AsyncFunction("sendSmsDirect") { phone: String, body: String ->
+      sendSmsDirectInternal(phone, body)
+    }
+
     OnDestroy {
+      FakeCallBridge.emitEvent = null
       stopRecordingInternal()
       stopPlaybackInternal()
     }
+  }
+
+  /** Returns "sent" | "denied" | "error:<reason>" */
+  private fun sendSmsDirectInternal(phone: String, body: String): String {
+    val ctx =
+      appContext.reactContext
+        ?: appContext.currentActivity
+        ?: return "error:no_context"
+    val appCtx = ctx.applicationContext
+    val to = normalizePhone(phone)
+    if (to.isEmpty()) {
+      Log.w(TAG, "sendSmsDirect empty phone raw='$phone'")
+      return "error:bad_phone"
+    }
+    if (body.isBlank()) {
+      return "error:empty_body"
+    }
+
+    val grantedSms =
+      ContextCompat.checkSelfPermission(appCtx, Manifest.permission.SEND_SMS) ==
+        PackageManager.PERMISSION_GRANTED
+    if (!grantedSms) {
+      Log.w(TAG, "SEND_SMS not granted")
+      return "denied"
+    }
+    val grantedPhone =
+      ContextCompat.checkSelfPermission(appCtx, Manifest.permission.READ_PHONE_STATE) ==
+        PackageManager.PERMISSION_GRANTED
+    if (!grantedPhone) {
+      Log.w(TAG, "READ_PHONE_STATE not granted — send may SecurityException")
+    }
+
+    val tm =
+      appCtx.getSystemService(android.content.Context.TELEPHONY_SERVICE)
+        as? android.telephony.TelephonyManager
+    try {
+      if (tm != null && !tm.isSmsCapable) {
+        Log.w(TAG, "device is not SMS capable")
+        return "error:not_sms_capable"
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "isSmsCapable check failed", e)
+    }
+
+    val managers = buildSmsManagers(appCtx)
+    if (managers.isEmpty()) {
+      return "error:no_sms_manager"
+    }
+
+    var lastError: String = "unknown"
+    for ((label, smsManager) in managers) {
+      try {
+        val parts = ArrayList(smsManager.divideMessage(body))
+        Log.i(TAG, "SMS try via=$label to=$to parts=${parts.size} bodyLen=${body.length}")
+        if (parts.size <= 1) {
+          smsManager.sendTextMessage(to, null, body, null, null)
+        } else {
+          smsManager.sendMultipartTextMessage(to, null, parts, null, null)
+        }
+        Log.i(TAG, "SMS accepted by framework via=$label to=$to")
+        return "sent"
+      } catch (e: SecurityException) {
+        lastError = "security:${e.message}"
+        Log.w(TAG, "SMS security via=$label", e)
+      } catch (e: IllegalArgumentException) {
+        lastError = "illegal_arg:${e.message}"
+        Log.w(TAG, "SMS illegal via=$label", e)
+      } catch (e: Exception) {
+        lastError = "${e.javaClass.simpleName}:${e.message}"
+        Log.w(TAG, "SMS failed via=$label", e)
+      }
+    }
+    return "error:$lastError"
+  }
+
+  private fun normalizePhone(raw: String): String {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return ""
+    val digits =
+      if (trimmed.startsWith("+")) {
+        "+" + trimmed.drop(1).filter { it.isDigit() }
+      } else {
+        trimmed.filter { it.isDigit() }
+      }
+    // Polish domestic 9-digit → E.164 (helps some carriers / Pixel telephony).
+    if (!digits.startsWith("+") && digits.length == 9 && digits.first() in '4'..'8') {
+      return "+48$digits"
+    }
+    if (!digits.startsWith("+") && digits.length == 11 && digits.startsWith("48")) {
+      return "+$digits"
+    }
+    return digits
+  }
+
+  private fun buildSmsManagers(
+    ctx: android.content.Context,
+  ): List<Pair<String, SmsManager>> {
+    val out = LinkedHashMap<String, SmsManager>()
+    fun add(label: String, manager: SmsManager?) {
+      if (manager != null) out.putIfAbsent(label, manager)
+    }
+
+    try {
+      @Suppress("DEPRECATION")
+      add("default", SmsManager.getDefault())
+    } catch (e: Exception) {
+      Log.w(TAG, "getDefault failed", e)
+    }
+
+    val subId = try {
+      SmsManager.getDefaultSmsSubscriptionId()
+    } catch (_: Exception) {
+      -1
+    }
+
+    if (subId != android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID && subId != -1) {
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+          add(
+            "sub_$subId",
+            ctx.getSystemService(SmsManager::class.java)?.createForSubscriptionId(subId),
+          )
+        }
+        @Suppress("DEPRECATION")
+        add("sub_legacy_$subId", SmsManager.getSmsManagerForSubscriptionId(subId))
+      } catch (e: Exception) {
+        Log.w(TAG, "subscription SmsManager failed", e)
+      }
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      try {
+        add("system_service", ctx.getSystemService(SmsManager::class.java))
+      } catch (e: Exception) {
+        Log.w(TAG, "SMS_SERVICE failed", e)
+      }
+    }
+
+    return out.toList()
   }
 
   private fun startPlaybackInternal() {
@@ -135,9 +355,17 @@ class SafeherAudioModule : Module() {
   }
 
   private fun writePlaybackInternal(base64: String) {
+    if (playbackPaused.get()) return
     val t = track ?: return
     if (base64.isEmpty()) return
     val pcm = Base64.decode(base64, Base64.DEFAULT)
+    if (pcm.isEmpty()) return
+    writePlaybackPcmInternal(pcm)
+  }
+
+  private fun writePlaybackPcmInternal(pcm: ByteArray) {
+    if (playbackPaused.get()) return
+    val t = track ?: return
     if (pcm.isEmpty()) return
     var offset = 0
     while (offset < pcm.size) {
