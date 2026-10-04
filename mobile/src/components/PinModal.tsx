@@ -107,7 +107,8 @@ export function PinModal({
               {KEYS.map((key) => (
                 <Pressable
                   key={key.digit}
-                  onPress={() => pressDigit(key.digit)}
+                  hitSlop={6}
+                  onPressIn={() => pressDigit(key.digit)}
                   style={({ pressed }) => [
                     styles.key,
                     {
@@ -133,7 +134,8 @@ export function PinModal({
             >
               <View style={{ width: keySize }} />
               <Pressable
-                onPress={() => pressDigit("0")}
+                hitSlop={6}
+                onPressIn={() => pressDigit("0")}
                 style={({ pressed }) => [
                   styles.key,
                   {
@@ -147,8 +149,9 @@ export function PinModal({
                 <Text style={[styles.keyDigit, styles.zeroDigit]}>0</Text>
               </Pressable>
               <Pressable
-                onPress={deleteDigit}
+                onPressIn={deleteDigit}
                 disabled={digits.length === 0}
+                hitSlop={6}
                 style={[
                   styles.deleteHit,
                   { width: keySize, height: keySize },
@@ -167,7 +170,11 @@ export function PinModal({
 
           <View style={styles.footer}>
             <View style={styles.footerSide} />
-            <Pressable onPress={onCancel} hitSlop={12} style={styles.footerSide}>
+            <Pressable
+              onPressIn={onCancel}
+              hitSlop={12}
+              style={styles.footerSide}
+            >
               <Text style={styles.cancelText}>Anuluj</Text>
             </Pressable>
           </View>

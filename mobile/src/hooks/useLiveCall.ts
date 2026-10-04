@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PermissionsAndroid, Platform } from "react-native";
+import { AppState, PermissionsAndroid, Platform } from "react-native";
 import * as Location from "expo-location";
 import { SafeherAudio } from "safeher-audio";
 
@@ -10,11 +10,18 @@ import { base64ToUint8Array } from "../utils";
 
 export type CallPhase = "incoming" | "connecting" | "active" | "ended";
 
+export type HangUpOptions = {
+  /** SMS only for duress / forced end — never for a correct PIN hang-up. */
+  sendSms?: boolean;
+  alertReason?: "manual" | "duress_pin_fail" | "power_button_triple";
+  endReason?: "user_hangup" | "app_background";
+};
+
 export type SmsDraft = {
-  level: number;
   body: string;
   toLabel: string;
   liveLocationLink?: string;
+  summary?: string | null;
   suspectOutfit?: string | null;
   distanceOrBehavior?: string | null;
   landmark?: string | null;
@@ -85,28 +92,35 @@ async function ensureMicPermission(): Promise<boolean> {
 type UseLiveCallOptions = {
   contactName: string;
   trustedPhone: string;
+  demoMode?: boolean;
 };
 
-export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
+export function useLiveCall({
+  contactName,
+  trustedPhone,
+  demoMode = false,
+}: UseLiveCallOptions) {
   const [phase, setPhase] = useState<CallPhase>("incoming");
   const [muted, setMuted] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [lastTranscript, setLastTranscript] = useState<string | null>(null);
   const [smsDraft, setSmsDraft] = useState<SmsDraft | null>(null);
-  const [alertLevel, setAlertLevel] = useState<0 | 1 | 2>(0);
+  const [smsSent, setSmsSent] = useState(false);
   const [smsStatus, setSmsStatus] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const micSubRef = useRef<{ remove: () => void } | null>(null);
   const mutedRef = useRef(false);
+  const playbackPausedRef = useRef(false);
   const endedRef = useRef(false);
+  const callStartedRef = useRef(false);
   const locationRef = useRef<GeoLocation>(FALLBACK_LOCATION);
   const smsDraftRef = useRef<SmsDraft | null>(null);
-  const alertLevelRef = useRef<0 | 1 | 2>(0);
   const contactNameRef = useRef(contactName);
   const trustedPhoneRef = useRef(trustedPhone);
+  const demoModeRef = useRef(demoMode);
   const pendingSmsResolveRef = useRef<((body: string) => void) | null>(null);
 
   useEffect(() => {
@@ -120,6 +134,10 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
   useEffect(() => {
     trustedPhoneRef.current = trustedPhone;
   }, [trustedPhone]);
+
+  useEffect(() => {
+    demoModeRef.current = demoMode;
+  }, [demoMode]);
 
   const clearTimer = useCallback(() => {
     if (timerRef.current) {
@@ -171,24 +189,6 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
     ws.send(JSON.stringify(msg));
   }, []);
 
-  const hangUp = useCallback(async () => {
-    if (endedRef.current) return;
-    endedRef.current = true;
-    clearTimer();
-    sendJson({ type: "session.end", reason: "user_hangup" });
-    closeSocket();
-    await teardownAudio();
-    setPhase("ended");
-  }, [clearTimer, closeSocket, sendJson, teardownAudio]);
-
-  const decline = useCallback(() => {
-    endedRef.current = true;
-    clearTimer();
-    closeSocket();
-    void teardownAudio();
-    setPhase("ended");
-  }, [clearTimer, closeSocket, teardownAudio]);
-
   const waitForServerSmsBody = useCallback((timeoutMs = 1600) => {
     return new Promise<string | null>((resolve) => {
       const timer = setTimeout(() => {
@@ -203,48 +203,89 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
     });
   }, []);
 
-  const dispatchSms = useCallback(
-    async (kind: "level1" | "level2" | "pin_fail", bodyOverride?: string) => {
-      const body =
-        bodyOverride ??
-        composeAlertSms({
-          kind,
-          location: locationRef.current,
-          smsDraft: smsDraftRef.current,
-        });
+  const dispatchSms = useCallback(async (bodyOverride?: string) => {
+    const body =
+      bodyOverride ??
+      composeAlertSms({
+        location: locationRef.current,
+        smsDraft: smsDraftRef.current,
+      });
+    try {
       const result = await sendAlertSms(trustedPhoneRef.current, body);
-      setSmsStatus(`${kind}:${result}`);
-      console.log("[sms]", kind, result, body);
+      if (result === "sent") {
+        setSmsSent(true);
+      }
+      setSmsStatus(`sms:${result}`);
+      console.log("[sms]", result, body);
       return result;
+    } catch (err) {
+      console.warn("[sms] dispatch failed", err);
+      setSmsStatus("sms:error");
+      return "error" as const;
+    }
+  }, []);
+
+  const hangUp = useCallback(
+    async (opts?: HangUpOptions) => {
+      if (endedRef.current) return;
+      endedRef.current = true;
+      clearTimer();
+
+      const shouldSms = Boolean(opts?.sendSms) && callStartedRef.current;
+      if (shouldSms) {
+        try {
+          sendJson({
+            type: "alert.trigger",
+            level: 1,
+            reason: opts?.alertReason ?? "manual",
+          });
+        } catch {
+          // ignore — compose locally if server unreachable
+        }
+        const serverBody = await waitForServerSmsBody(1200);
+        await dispatchSms(serverBody ?? undefined);
+      }
+
+      sendJson({
+        type: "session.end",
+        reason: opts?.endReason ?? "user_hangup",
+      });
+      closeSocket();
+      await teardownAudio();
+      setPhase("ended");
     },
-    [],
+    [
+      clearTimer,
+      closeSocket,
+      sendJson,
+      teardownAudio,
+      waitForServerSmsBody,
+      dispatchSms,
+    ],
   );
+
+  const decline = useCallback(() => {
+    endedRef.current = true;
+    callStartedRef.current = false;
+    clearTimer();
+    closeSocket();
+    void teardownAudio();
+    setPhase("ended");
+  }, [clearTimer, closeSocket, teardownAudio]);
 
   const triggerAlert = useCallback(async () => {
     if (phase !== "connecting" && phase !== "active") return;
-    const current = alertLevelRef.current;
-    if (current >= 2) return;
 
-    const next = (current === 0 ? 1 : 2) as 1 | 2;
-    alertLevelRef.current = next;
-    setAlertLevel(next);
-
-    const kind = next === 1 ? "level1" : "level2";
     const serverBodyPromise = waitForServerSmsBody();
     sendJson({
       type: "alert.trigger",
-      level: next,
+      level: 1,
       reason: "manual",
     });
 
-    // Prefer backend SMS body (includes threat details collected mid-call).
     const serverBody = await serverBodyPromise;
-    await dispatchSms(kind, serverBody ?? undefined);
+    await dispatchSms(serverBody ?? undefined);
   }, [phase, sendJson, dispatchSms, waitForServerSmsBody]);
-
-  const sendPinFailAlert = useCallback(async () => {
-    await dispatchSms("pin_fail");
-  }, [dispatchSms]);
 
   const handleServerMessage = useCallback(
     (raw: string) => {
@@ -257,6 +298,7 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
 
       switch (msg.type) {
         case "session.ready":
+          callStartedRef.current = true;
           setPhase("active");
           setElapsedSec(0);
           clearTimer();
@@ -283,10 +325,10 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
           break;
         case "tool.sms_payload": {
           const draft: SmsDraft = {
-            level: msg.level,
             body: msg.body,
             toLabel: msg.to_label,
             liveLocationLink: msg.meta?.live_location_link,
+            summary: msg.meta?.summary,
             suspectOutfit: msg.meta?.suspect_outfit,
             distanceOrBehavior: msg.meta?.distance_or_behavior,
             landmark: msg.meta?.landmark,
@@ -314,7 +356,7 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
 
     micSubRef.current?.remove();
     micSubRef.current = SafeherAudio.addAudioChunkListener((event) => {
-      if (mutedRef.current) return;
+      if (mutedRef.current || playbackPausedRef.current) return;
       if (ws.readyState !== WebSocket.OPEN) return;
       if (!event?.data) return;
       try {
@@ -331,16 +373,20 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
   const answer = useCallback(async () => {
     if (phase !== "incoming") return;
     endedRef.current = false;
-    alertLevelRef.current = 0;
+    callStartedRef.current = false;
     mutedRef.current = false;
+    playbackPausedRef.current = false;
     setMuted(false);
+    setSmsSent(false);
+    setSmsStatus(null);
     try {
       SafeherAudio.setMuted(false);
+      SafeherAudio.setPlaybackPaused(false);
     } catch {
       // ignore
     }
-    setAlertLevel(0);
-    setSmsStatus(null);
+    setSmsDraft(null);
+    smsDraftRef.current = null;
     setError(null);
     setPhase("connecting");
 
@@ -371,6 +417,8 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
           handleServerMessage(event.data);
           return;
         }
+        // Drop agent audio while PIN / hang-up UI is open so keypad stays responsive.
+        if (playbackPausedRef.current) return;
         const buffer =
           event.data instanceof ArrayBuffer
             ? new Uint8Array(event.data)
@@ -384,7 +432,8 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
 
       ws.onclose = () => {
         if (!endedRef.current) {
-          void hangUp();
+          // Unexpected drop (process kill / network) — treat as forced end.
+          void hangUp({ sendSms: true, endReason: "app_background" });
         }
       };
 
@@ -395,6 +444,7 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
         location,
         locale: "pl-PL",
         contact_name: contactNameRef.current,
+        demo_mode: demoModeRef.current,
         client: {
           platform: Platform.OS,
           app_version: "0.1.0",
@@ -442,6 +492,31 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
     setMuted(next);
   }, []);
 
+  const setPlaybackPaused = useCallback((paused: boolean) => {
+    playbackPausedRef.current = paused;
+    try {
+      SafeherAudio.setPlaybackPaused(paused);
+    } catch (err) {
+      console.warn("[safeher-audio] setPlaybackPaused failed", err);
+      if (paused) {
+        try {
+          SafeherAudio.flushPlayback();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next !== "background") return;
+      if (endedRef.current || !callStartedRef.current) return;
+      void hangUp({ sendSms: true, endReason: "app_background" });
+    });
+    return () => sub.remove();
+  }, [hangUp]);
+
   useEffect(() => {
     return () => {
       endedRef.current = true;
@@ -459,13 +534,13 @@ export function useLiveCall({ contactName, trustedPhone }: UseLiveCallOptions) {
     lastTranscript,
     smsDraft,
     smsStatus,
-    alertLevel,
+    smsSent,
     contactName,
     answer,
     decline,
     hangUp,
     triggerAlert,
-    sendPinFailAlert,
     toggleMute,
+    setPlaybackPaused,
   };
 }

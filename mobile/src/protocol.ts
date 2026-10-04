@@ -14,6 +14,7 @@ export type ClientMessage =
       location: GeoLocation;
       locale?: string;
       contact_name?: string;
+      demo_mode?: boolean;
       client?: { platform: string; app_version: string };
     }
   | { type: "session.update_location"; location: GeoLocation }

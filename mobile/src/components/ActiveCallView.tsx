@@ -1,10 +1,12 @@
-import { useRef } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Linking, StyleSheet, Text, View } from "react-native";
 
 import { formatCallDuration } from "../utils";
 import { formatPhone } from "../utils/phone";
 import { CallChrome } from "./CallChrome";
 import { LiquidGlassButton } from "./LiquidGlassButton";
+
+/** Demo emergency number — swap to 112 for production. */
+const SOS_NUMBER = "113";
 
 type Props = {
   contactName: string;
@@ -12,13 +14,11 @@ type Props = {
   elapsedSec: number;
   muted: boolean;
   connecting?: boolean;
-  alertLevel?: 0 | 1 | 2;
+  smsSent?: boolean;
   onToggleMute: () => void;
   onHangUp: () => void;
-  onSecretTrigger: () => void;
+  onSendAlert: () => void;
 };
-
-const TAP_WINDOW_MS = 900;
 
 export function ActiveCallView({
   contactName,
@@ -26,25 +26,13 @@ export function ActiveCallView({
   elapsedSec,
   muted,
   connecting,
-  alertLevel = 0,
+  smsSent = false,
   onToggleMute,
   onHangUp,
-  onSecretTrigger,
+  onSendAlert,
 }: Props) {
-  const tapsRef = useRef({ count: 0, lastAt: 0 });
-
-  const handleNameTap = () => {
-    const now = Date.now();
-    const taps = tapsRef.current;
-    if (now - taps.lastAt > TAP_WINDOW_MS) {
-      taps.count = 0;
-    }
-    taps.lastAt = now;
-    taps.count += 1;
-    if (taps.count >= 3) {
-      taps.count = 0;
-      onSecretTrigger();
-    }
+  const callSos = () => {
+    void Linking.openURL(`tel:${SOS_NUMBER}`);
   };
 
   return (
@@ -54,28 +42,27 @@ export function ActiveCallView({
           {connecting ? "łączenie…" : formatCallDuration(elapsedSec)}
         </Text>
 
-        <Pressable
-          onPress={handleNameTap}
-          accessibilityLabel="Kontakt — naciśnij 3× aby wysłać alert"
-          style={styles.identity}
-        >
+        <View style={styles.identity}>
           <Text style={styles.name} numberOfLines={2}>
             {contactName}
           </Text>
           <Text style={styles.phone}>{formatPhone(phoneNumber)}</Text>
-        </Pressable>
+        </View>
 
-        {alertLevel > 0 ? (
-          <Text style={styles.alertHint}>
-            {alertLevel === 1 ? "Alert L1 wysłany" : "Alert L2 wysłany"}
-          </Text>
+        {smsSent ? (
+          <Text style={styles.alertHint}>SMS wysłany</Text>
         ) : null}
       </View>
 
       <View style={styles.grid}>
         <View style={styles.row}>
           <LiquidGlassButton label="Głośnik" icon="volume-high-outline" dimmed />
-          <LiquidGlassButton label="FaceTime" icon="videocam-outline" dimmed />
+          <LiquidGlassButton
+            label="SMS"
+            icon="chatbubble-ellipses-outline"
+            onPress={onSendAlert}
+            accessibilityLabel="Wyślij alert SMS"
+          />
           <LiquidGlassButton
             label="Wycisz"
             icon={muted ? "mic-off-outline" : "mic-outline"}
@@ -94,7 +81,12 @@ export function ActiveCallView({
             onPress={onHangUp}
             accessibilityLabel="Zakończ połączenie"
           />
-          <LiquidGlassButton label="Klawiatura" icon="keypad-outline" dimmed />
+          <LiquidGlassButton
+            label="SOS"
+            icon="warning-outline"
+            onPress={callSos}
+            accessibilityLabel={`Zadzwoń na numer alarmowy ${SOS_NUMBER}`}
+          />
         </View>
       </View>
     </CallChrome>

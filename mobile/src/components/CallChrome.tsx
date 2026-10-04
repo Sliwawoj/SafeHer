@@ -9,8 +9,8 @@ import {
 } from "../theme/callColors";
 
 /**
- * Smooth vertical slate→charcoal background.
- * No side vignettes (those caused the vertical stripe artifacts).
+ * Smooth vertical amethyst → near-black slate background.
+ * No side vignettes (those caused vertical stripe artifacts).
  */
 export function CallChrome({ children }: { children: ReactNode }) {
   return (

@@ -12,6 +12,7 @@ type Props = {
   onDecline: () => void;
   onOpenSettings?: () => void;
   busy?: boolean;
+  ringing?: boolean;
   error?: string | null;
 };
 
@@ -22,6 +23,7 @@ export function IncomingCallView({
   onDecline,
   onOpenSettings,
   busy,
+  ringing = false,
   error,
 }: Props) {
   return (
@@ -44,7 +46,9 @@ export function IncomingCallView({
       <View style={styles.identity}>
         <Text style={styles.name}>{contactName}</Text>
         <Text style={styles.phone}>{formatPhone(phoneNumber)}</Text>
-        <Text style={styles.hint}>Połączenie mobilne…</Text>
+        <Text style={styles.hint}>
+          {ringing ? "Dzwoni…" : "Połączenie mobilne…"}
+        </Text>
         {error ? <Text style={styles.error}>{error}</Text> : null}
       </View>
 
