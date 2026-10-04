@@ -14,12 +14,19 @@ function normalize(raw: Partial<SafeHerSettings> | null): SafeHerSettings | null
   if (!contactName || !trustedPhone || !/^\d{4}$/.test(userPin)) {
     return null;
   }
-  return { contactName, trustedPhone, userPin };
+  return {
+    contactName,
+    trustedPhone,
+    userPin,
+    demoMode: Boolean(raw.demoMode),
+  };
 }
 
 export async function loadSettings(): Promise<SafeHerSettings | null> {
   try {
-    const raw = await AsyncStorage.getItem(SETTINGS_STORAGE_KEY);
+    const raw =
+      (await AsyncStorage.getItem(SETTINGS_STORAGE_KEY)) ??
+      (await AsyncStorage.getItem("@safeher/settings/v1"));
     if (!raw) return null;
     return normalize(JSON.parse(raw) as Partial<SafeHerSettings>);
   } catch {

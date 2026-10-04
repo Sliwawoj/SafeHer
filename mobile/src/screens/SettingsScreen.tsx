@@ -26,6 +26,7 @@ export function SettingsScreen({ initial, onSave, onCancel }: Props) {
   const [contactName, setContactName] = useState(seed.contactName);
   const [trustedPhone, setTrustedPhone] = useState(seed.trustedPhone);
   const [userPin, setUserPin] = useState(seed.userPin);
+  const [demoMode, setDemoMode] = useState(Boolean(seed.demoMode));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -49,6 +50,7 @@ export function SettingsScreen({ initial, onSave, onCancel }: Props) {
         contactName: contactName.trim(),
         trustedPhone: trustedPhone.trim(),
         userPin: userPin.trim(),
+        demoMode,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -94,6 +96,30 @@ export function SettingsScreen({ initial, onSave, onCancel }: Props) {
             secureTextEntry
             maxLength={4}
           />
+
+          <Pressable
+            onPress={() => setDemoMode((v) => !v)}
+            style={({ pressed }) => [
+              styles.toggleRow,
+              pressed && styles.pressed,
+            ]}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: demoMode }}
+          >
+            <View style={styles.toggleTextCol}>
+              <Text style={styles.toggleTitle}>Tryb demo</Text>
+              <Text style={styles.toggleHint}>
+                Skryptowana rozmowa prezentacyjna (Żabka / rysopis / SMS)
+              </Text>
+            </View>
+            <View
+              style={[styles.togglePill, demoMode && styles.togglePillOn]}
+            >
+              <Text style={styles.togglePillText}>
+                {demoMode ? "ON" : "OFF"}
+              </Text>
+            </View>
+          </Pressable>
 
           {error ? <Text style={styles.error}>{error}</Text> : null}
 
@@ -170,6 +196,50 @@ const styles = StyleSheet.create({
     paddingVertical: 15,
     color: "#FFFFFF",
     fontSize: 17,
+  },
+  toggleRow: {
+    marginTop: 8,
+    marginBottom: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.14)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  toggleTextCol: {
+    flex: 1,
+    gap: 4,
+  },
+  toggleTitle: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "500",
+  },
+  toggleHint: {
+    color: "rgba(255,255,255,0.45)",
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  togglePill: {
+    minWidth: 48,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    alignItems: "center",
+  },
+  togglePillOn: {
+    backgroundColor: "rgba(120, 200, 140, 0.35)",
+  },
+  togglePillText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "600",
+    letterSpacing: 0.4,
   },
   error: {
     color: "#FF8B8B",

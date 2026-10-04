@@ -52,6 +52,7 @@ class SessionInit(BaseModel):
     location: GeoLocation
     locale: str = "pl-PL"
     contact_name: str | None = None
+    demo_mode: bool = False
     client: dict[str, Any] | None = None
     # Legacy field from LOUDSPEAKER/SILENT split — ignored if present.
     mode: str | None = None
@@ -114,11 +115,11 @@ def _live_location_link(location: GeoLocation | None) -> str:
 
 def sms_payload(
     *,
-    level: int,
     location: GeoLocation | None,
     summary: str | None = None,
     threat: ThreatInfo | None = None,
 ) -> dict[str, Any]:
+    """Single end-of-call / alert SMS: fear + chat details + location."""
     maps = _live_location_link(location)
     threat = threat or ThreatInfo()
     threat_parts = threat.as_summary_parts()
@@ -128,29 +129,20 @@ def sms_payload(
         "landmark": threat.landmark,
     }
 
-    if level >= 3:
-        body = (
-            "UWAGA: Połączenie SafeHer zostało przerwane bez poprawnego kodu PIN. "
-            f"Istnieje ryzyko ataku. Sprawdź lokalizację: {maps}"
-        )
-    elif level == 2:
-        body = (
-            "POTRZEBNA PILNA POMOC! Zadzwoń pod 112 lub natychmiast do mnie. "
-            f"Moja aktualna pozycja: {maps}"
-        )
-        if threat_parts:
-            body = f"{body}\n" + " | ".join(threat_parts)
-    else:
-        body = f"Czuję zagrożenie. Śledź moją lokalizację: {maps}"
-        details: list[str] = list(threat_parts)
-        if summary and summary not in details:
-            details.append(summary)
-        if details:
-            body = f"{body}\nSzczegóły: " + " | ".join(details)
+    details: list[str] = list(threat_parts)
+    if summary and summary not in details:
+        details.append(summary)
+    details_text = " | ".join(details) if details else "brak dodatkowych szczegółów"
+
+    body = (
+        "[SafeHer] Czuję niepokój / lęk. "
+        f"Szczegóły z rozmowy: {details_text}. "
+        f"Moja lokalizacja: {maps}"
+    )
 
     return {
         "type": "tool.sms_payload",
-        "level": level,
+        "level": 1,
         "to_label": "trusted_contact",
         "body": body,
         "meta": {
@@ -166,6 +158,9 @@ class SessionState(BaseModel):
     location: GeoLocation | None = None
     locale: str = "pl-PL"
     contact_name: str | None = None
+    demo_mode: bool = False
+    demo_user_turns: int = 0
+    demo_next_agent_line: int = 1
     last_summary: str | None = Field(default=None)
     threat: ThreatInfo = Field(default_factory=ThreatInfo)
     user_notes: list[str] = Field(default_factory=list)
