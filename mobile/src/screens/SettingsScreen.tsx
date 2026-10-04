@@ -12,25 +12,16 @@ import {
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 
+import { CallChrome } from "../components/CallChrome";
 import { DEFAULT_SETTINGS, type SafeHerSettings } from "../settings/types";
 
 type Props = {
   initial?: SafeHerSettings | null;
-  title?: string;
-  subtitle?: string;
-  submitLabel?: string;
   onSave: (settings: SafeHerSettings) => Promise<void>;
   onCancel?: () => void;
 };
 
-export function SettingsScreen({
-  initial,
-  title = "Konfiguracja SafeHer",
-  subtitle = "Ustaw kontakt dzwoniący, numer alertów SMS i PIN bezpieczeństwa.",
-  submitLabel = "Zapisz i aktywuj SafeHer",
-  onSave,
-  onCancel,
-}: Props) {
+export function SettingsScreen({ initial, onSave, onCancel }: Props) {
   const seed = initial ?? DEFAULT_SETTINGS;
   const [contactName, setContactName] = useState(seed.contactName);
   const [trustedPhone, setTrustedPhone] = useState(seed.trustedPhone);
@@ -49,7 +40,7 @@ export function SettingsScreen({
   const handleSave = async () => {
     setError(null);
     if (!canSubmit) {
-      setError("Uzupełnij imię, numer telefonu i 4-cyfrowy PIN.");
+      setError("Uzupełnij wszystkie pola.");
       return;
     }
     setSaving(true);
@@ -67,81 +58,78 @@ export function SettingsScreen({
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.root}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
+    <CallChrome>
       <StatusBar style="light" />
-      <ScrollView
-        contentContainerStyle={styles.content}
-        keyboardShouldPersistTaps="handled"
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        <Text style={styles.brand}>SafeHer</Text>
-        <Text style={styles.title}>{title}</Text>
-        <Text style={styles.subtitle}>{subtitle}</Text>
-
-        <Field
-          label="Imię kontaktu dzwoniącego"
-          value={contactName}
-          onChangeText={setContactName}
-          placeholder="np. Tomek"
-          autoCapitalize="words"
-        />
-        <Field
-          label="Numer zaufany (SMS)"
-          value={trustedPhone}
-          onChangeText={setTrustedPhone}
-          placeholder="np. +48123456789"
-          keyboardType="phone-pad"
-          autoCapitalize="none"
-        />
-        <Field
-          label="PIN bezpieczeństwa (4 cyfry)"
-          value={userPin}
-          onChangeText={(t) => setUserPin(t.replace(/\D/g, "").slice(0, 4))}
-          placeholder="1234"
-          keyboardType="number-pad"
-          secureTextEntry
-          maxLength={4}
-        />
-
-        {error ? <Text style={styles.error}>{error}</Text> : null}
-
-        <Pressable
-          onPress={() => {
-            void handleSave();
-          }}
-          disabled={saving || !canSubmit}
-          style={({ pressed }) => [
-            styles.primary,
-            (!canSubmit || saving) && styles.disabled,
-            pressed && styles.pressed,
-          ]}
+        <ScrollView
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
         >
-          <Text style={styles.primaryText}>
-            {saving ? "Zapisywanie…" : submitLabel}
-          </Text>
-        </Pressable>
+          <Text style={styles.title}>Ustawienia</Text>
 
-        {onCancel ? (
-          <Pressable onPress={onCancel} style={styles.secondary}>
-            <Text style={styles.secondaryText}>Anuluj</Text>
+          <Field
+            label="Imię kontaktu"
+            value={contactName}
+            onChangeText={setContactName}
+            placeholder="Tomek"
+            autoCapitalize="words"
+          />
+          <Field
+            label="Numer telefonu"
+            value={trustedPhone}
+            onChangeText={setTrustedPhone}
+            placeholder="+48 123 456 789"
+            keyboardType="phone-pad"
+            autoCapitalize="none"
+          />
+          <Field
+            label="PIN"
+            value={userPin}
+            onChangeText={(t) => setUserPin(t.replace(/\D/g, "").slice(0, 4))}
+            placeholder="••••"
+            keyboardType="number-pad"
+            secureTextEntry
+            maxLength={4}
+          />
+
+          {error ? <Text style={styles.error}>{error}</Text> : null}
+
+          <Pressable
+            onPress={() => {
+              void handleSave();
+            }}
+            disabled={saving || !canSubmit}
+            style={({ pressed }) => [
+              styles.primary,
+              (!canSubmit || saving) && styles.disabled,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.primaryText}>
+              {saving ? "Zapisywanie…" : "Zapisz"}
+            </Text>
           </Pressable>
-        ) : null}
-      </ScrollView>
-    </KeyboardAvoidingView>
+
+          {onCancel ? (
+            <Pressable onPress={onCancel} style={styles.secondary}>
+              <Text style={styles.secondaryText}>Anuluj</Text>
+            </Pressable>
+          ) : null}
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </CallChrome>
   );
 }
 
-function Field({
-  label,
-  ...inputProps
-}: { label: string } & TextInputProps) {
+function Field({ label, ...inputProps }: { label: string } & TextInputProps) {
   return (
     <View style={styles.field}>
       <Text style={styles.label}>{label}</Text>
       <TextInput
-        placeholderTextColor="rgba(255,255,255,0.35)"
+        placeholderTextColor="rgba(255,255,255,0.3)"
         style={styles.input}
         {...inputProps}
       />
@@ -150,52 +138,38 @@ function Field({
 }
 
 const styles = StyleSheet.create({
-  root: {
+  flex: {
     flex: 1,
-    backgroundColor: "#0B1220",
   },
   content: {
-    paddingHorizontal: 24,
+    paddingHorizontal: 28,
     paddingTop: 72,
     paddingBottom: 40,
   },
-  brand: {
-    color: "#7EB6FF",
-    fontSize: 13,
-    letterSpacing: 1.4,
-    textTransform: "uppercase",
-    marginBottom: 10,
-    fontWeight: "600",
-  },
   title: {
     color: "#FFFFFF",
-    fontSize: 28,
-    fontWeight: "700",
-    marginBottom: 8,
-  },
-  subtitle: {
-    color: "rgba(255,255,255,0.62)",
-    fontSize: 15,
-    lineHeight: 22,
-    marginBottom: 28,
+    fontSize: 32,
+    fontWeight: "600",
+    marginBottom: 36,
+    letterSpacing: 0.2,
   },
   field: {
-    marginBottom: 16,
+    marginBottom: 20,
   },
   label: {
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 13,
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 14,
     marginBottom: 8,
   },
   input: {
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: "rgba(255,255,255,0.14)",
-    backgroundColor: "rgba(255,255,255,0.06)",
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 15,
     color: "#FFFFFF",
-    fontSize: 16,
+    fontSize: 17,
   },
   error: {
     color: "#FF8B8B",
@@ -203,28 +177,30 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   primary: {
-    marginTop: 8,
-    backgroundColor: "#2E6BFF",
+    marginTop: 12,
+    backgroundColor: "rgba(255,255,255,0.16)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.2)",
     borderRadius: 999,
     paddingVertical: 16,
     alignItems: "center",
   },
   primaryText: {
     color: "#FFFFFF",
-    fontSize: 16,
-    fontWeight: "600",
+    fontSize: 17,
+    fontWeight: "500",
   },
   secondary: {
     marginTop: 14,
     alignItems: "center",
-    paddingVertical: 10,
+    paddingVertical: 12,
   },
   secondaryText: {
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 15,
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 16,
   },
   disabled: {
-    opacity: 0.5,
+    opacity: 0.45,
   },
   pressed: {
     opacity: 0.88,

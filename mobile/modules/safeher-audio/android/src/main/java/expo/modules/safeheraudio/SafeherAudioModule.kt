@@ -179,12 +179,11 @@ class SafeherAudioModule : Module() {
         val n = rec.read(buffer, 0, READ_BYTES)
         if (n <= 0) continue
 
-        val payload = if (muted.get()) {
-          ByteArray(n)
-        } else {
-          buffer.copyOf(n)
-        }
+        // While muted: keep draining the mic, but do not emit chunks to JS/WS.
+        // Sending silence still looks like activity to Gemini VAD.
+        if (muted.get()) continue
 
+        val payload = buffer.copyOf(n)
         val b64 = Base64.encodeToString(payload, Base64.NO_WRAP)
         try {
           val body = Bundle()

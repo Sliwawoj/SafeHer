@@ -1,5 +1,5 @@
-import { useCallback, useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useState } from "react";
+import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 
 import { ActiveCallView } from "./components/ActiveCallView";
@@ -26,6 +26,13 @@ export function FakeCallScreen({ onRestart }: Props) {
     contactName: settings?.contactName ?? "Tomek",
     trustedPhone: settings?.trustedPhone ?? "",
   });
+
+  // After hang-up / decline → immediately back to incoming-call home.
+  useEffect(() => {
+    if (call.phase === "ended") {
+      onRestart();
+    }
+  }, [call.phase, onRestart]);
 
   const requestHangUp = useCallback(() => {
     setPinAttemptsLeft(MAX_PIN_ATTEMPTS);
@@ -64,9 +71,6 @@ export function FakeCallScreen({ onRestart }: Props) {
     return (
       <SettingsScreen
         initial={settings}
-        title="Ustawienia SafeHer"
-        subtitle="Zmień imię kontaktu, numer alertów SMS lub PIN."
-        submitLabel="Zapisz ustawienia"
         onCancel={() => setShowSettings(false)}
         onSave={async (next) => {
           await save(next);
@@ -78,18 +82,9 @@ export function FakeCallScreen({ onRestart }: Props) {
 
   if (call.phase === "ended") {
     return (
-      <View style={styles.ended}>
+      <View style={styles.boot}>
         <StatusBar style="light" />
-        <Text style={styles.endedTitle}>Połączenie zakończone</Text>
-        {call.smsStatus ? (
-          <Text style={styles.endedMeta}>SMS: {call.smsStatus}</Text>
-        ) : null}
-        <Pressable style={styles.restart} onPress={onRestart}>
-          <Text style={styles.restartText}>Symuluj kolejne połączenie</Text>
-        </Pressable>
-        <Pressable style={styles.settingsLink} onPress={() => setShowSettings(true)}>
-          <Text style={styles.settingsLinkText}>Ustawienia</Text>
-        </Pressable>
+        <ActivityIndicator color="rgba(255,255,255,0.35)" />
       </View>
     );
   }
@@ -100,6 +95,7 @@ export function FakeCallScreen({ onRestart }: Props) {
         <StatusBar style="light" />
         <IncomingCallView
           contactName={call.contactName}
+          phoneNumber={settings?.trustedPhone ?? ""}
           onAnswer={() => {
             void call.answer();
           }}
@@ -116,13 +112,12 @@ export function FakeCallScreen({ onRestart }: Props) {
       <StatusBar style="light" />
       <ActiveCallView
         contactName={call.contactName}
+        phoneNumber={settings?.trustedPhone ?? ""}
         elapsedSec={call.elapsedSec}
-        mode={call.mode}
         muted={call.muted}
         connecting={call.phase === "connecting"}
         alertLevel={call.alertLevel}
         onToggleMute={call.toggleMute}
-        onToggleSpeaker={call.toggleSpeakerMode}
         onHangUp={requestHangUp}
         onSecretTrigger={() => {
           void call.triggerAlert();
@@ -152,7 +147,7 @@ export function FakeCallApp() {
     return (
       <View style={styles.boot}>
         <StatusBar style="light" />
-        <ActivityIndicator color="#7EB6FF" />
+        <ActivityIndicator color="rgba(255,255,255,0.45)" />
         <Text style={styles.bootText}>SafeHer…</Text>
       </View>
     );
@@ -174,52 +169,13 @@ export function FakeCallApp() {
 const styles = StyleSheet.create({
   boot: {
     flex: 1,
-    backgroundColor: "#0B1220",
+    backgroundColor: "#2A3038",
     alignItems: "center",
     justifyContent: "center",
     gap: 12,
   },
   bootText: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 14,
-  },
-  ended: {
-    flex: 1,
-    backgroundColor: "#0B1220",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-  },
-  endedTitle: {
-    color: "#fff",
-    fontSize: 22,
-    fontWeight: "600",
-    marginBottom: 16,
-  },
-  endedMeta: {
     color: "rgba(255,255,255,0.45)",
-    fontSize: 12,
-    marginBottom: 12,
-    textAlign: "center",
-  },
-  restart: {
-    marginTop: 8,
-    paddingVertical: 14,
-    paddingHorizontal: 22,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.12)",
-  },
-  restartText: {
-    color: "#FFFFFF",
-    fontSize: 15,
-    fontWeight: "500",
-  },
-  settingsLink: {
-    marginTop: 16,
-    padding: 10,
-  },
-  settingsLinkText: {
-    color: "rgba(255,255,255,0.5)",
     fontSize: 14,
   },
 });

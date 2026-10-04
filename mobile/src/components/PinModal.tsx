@@ -1,5 +1,21 @@
 import { useEffect, useState } from "react";
-import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  Modal,
+  Platform,
+  Pressable,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+} from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+
+import { CallChrome } from "./CallChrome";
+
+const TOP_PAD =
+  (Platform.OS === "android" ? StatusBar.currentHeight ?? 24 : 44) + 36;
+const BOTTOM_PAD = Platform.OS === "ios" ? 34 : 20;
 
 type Props = {
   visible: boolean;
@@ -9,7 +25,17 @@ type Props = {
   onCancel: () => void;
 };
 
-const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "⌫"] as const;
+const KEYS: { digit: string; letters?: string }[] = [
+  { digit: "1" },
+  { digit: "2", letters: "ABC" },
+  { digit: "3", letters: "DEF" },
+  { digit: "4", letters: "GHI" },
+  { digit: "5", letters: "JKL" },
+  { digit: "6", letters: "MNO" },
+  { digit: "7", letters: "PQRS" },
+  { digit: "8", letters: "TUV" },
+  { digit: "9", letters: "WXYZ" },
+];
 
 export function PinModal({
   visible,
@@ -19,165 +45,247 @@ export function PinModal({
   onCancel,
 }: Props) {
   const [digits, setDigits] = useState("");
+  const { width } = useWindowDimensions();
+  const keySize = Math.min(84, Math.round(width * 0.2));
+  const keyGap = Math.round(keySize * 0.28);
 
   useEffect(() => {
     if (visible) setDigits("");
   }, [visible, attemptsLeft, error]);
 
-  const press = (key: string) => {
-    if (!key) return;
-    if (key === "⌫") {
-      setDigits((d) => d.slice(0, -1));
-      return;
-    }
+  const pressDigit = (digit: string) => {
     setDigits((d) => {
       if (d.length >= 4) return d;
-      const next = d + key;
+      const next = d + digit;
       if (next.length === 4) {
-        setTimeout(() => onSubmit(next), 0);
-        return "";
+        setTimeout(() => onSubmit(next), 80);
+        return next;
       }
       return next;
     });
   };
 
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
-      <View style={styles.backdrop}>
-        <View style={styles.card}>
-          <Text style={styles.title}>Podaj PIN</Text>
-          <Text style={styles.sub}>
-            Aby zakończyć połączenie, wpisz 4-cyfrowy kod.
-          </Text>
-          <View style={styles.dots}>
-            {[0, 1, 2, 3].map((i) => (
-              <View
-                key={i}
-                style={[styles.dot, i < digits.length && styles.dotFilled]}
-              />
-            ))}
-          </View>
-          {error ? <Text style={styles.error}>{error}</Text> : null}
-          <Text style={styles.attempts}>Pozostałe próby: {attemptsLeft}</Text>
+  const deleteDigit = () => {
+    setDigits((d) => d.slice(0, -1));
+  };
 
-          <View style={styles.pad}>
-            {KEYS.map((key, idx) => (
+  return (
+    <Modal
+      visible={visible}
+      animationType="fade"
+      presentationStyle="fullScreen"
+      onRequestClose={onCancel}
+    >
+      <CallChrome>
+        <View
+          style={[
+            styles.root,
+            {
+              paddingTop: TOP_PAD,
+              paddingBottom: BOTTOM_PAD,
+            },
+          ]}
+        >
+          <View style={styles.header}>
+            <Text style={styles.title}>Wpisz kod PIN</Text>
+            <View style={styles.dots}>
+              {[0, 1, 2, 3].map((i) => (
+                <View
+                  key={i}
+                  style={[styles.dot, i < digits.length && styles.dotFilled]}
+                />
+              ))}
+            </View>
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+            <Text style={styles.attempts}>
+              Pozostałe próby: {attemptsLeft}
+            </Text>
+          </View>
+
+          <View style={styles.padBlock}>
+            <View style={[styles.pad, { gap: keyGap }]}>
+              {KEYS.map((key) => (
+                <Pressable
+                  key={key.digit}
+                  onPress={() => pressDigit(key.digit)}
+                  style={({ pressed }) => [
+                    styles.key,
+                    {
+                      width: keySize,
+                      height: keySize,
+                      borderRadius: keySize / 2,
+                    },
+                    pressed && styles.keyPressed,
+                  ]}
+                >
+                  <Text style={styles.keyDigit}>{key.digit}</Text>
+                  {key.letters ? (
+                    <Text style={styles.keyLetters}>{key.letters}</Text>
+                  ) : (
+                    <View style={styles.lettersSpacer} />
+                  )}
+                </Pressable>
+              ))}
+            </View>
+
+            <View
+              style={[styles.zeroRow, { marginTop: keyGap, gap: keyGap }]}
+            >
+              <View style={{ width: keySize }} />
               <Pressable
-                key={`${key}-${idx}`}
-                disabled={!key}
-                onPress={() => press(key)}
+                onPress={() => pressDigit("0")}
                 style={({ pressed }) => [
                   styles.key,
-                  !key && styles.keyEmpty,
-                  pressed && key ? styles.keyPressed : null,
+                  {
+                    width: keySize,
+                    height: keySize,
+                    borderRadius: keySize / 2,
+                  },
+                  pressed && styles.keyPressed,
                 ]}
               >
-                <Text style={styles.keyText}>{key}</Text>
+                <Text style={[styles.keyDigit, styles.zeroDigit]}>0</Text>
               </Pressable>
-            ))}
+              <Pressable
+                onPress={deleteDigit}
+                disabled={digits.length === 0}
+                style={[
+                  styles.deleteHit,
+                  { width: keySize, height: keySize },
+                  digits.length === 0 && styles.deleteHidden,
+                ]}
+                accessibilityLabel="Usuń"
+              >
+                <Ionicons
+                  name="backspace-outline"
+                  size={26}
+                  color="rgba(255,255,255,0.9)"
+                />
+              </Pressable>
+            </View>
           </View>
 
-          <Pressable onPress={onCancel} style={styles.cancel}>
-            <Text style={styles.cancelText}>Anuluj</Text>
-          </Pressable>
+          <View style={styles.footer}>
+            <View style={styles.footerSide} />
+            <Pressable onPress={onCancel} hitSlop={12} style={styles.footerSide}>
+              <Text style={styles.cancelText}>Anuluj</Text>
+            </Pressable>
+          </View>
         </View>
-      </View>
+      </CallChrome>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: {
+  root: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.62)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
+    justifyContent: "space-between",
+    paddingHorizontal: 28,
   },
-  card: {
-    width: "100%",
-    maxWidth: 360,
-    borderRadius: 22,
-    backgroundColor: "#152238",
-    paddingHorizontal: 20,
-    paddingTop: 22,
-    paddingBottom: 16,
+  header: {
+    alignItems: "center",
   },
   title: {
-    color: "#fff",
-    fontSize: 20,
-    fontWeight: "700",
-    textAlign: "center",
-  },
-  sub: {
-    marginTop: 8,
-    color: "rgba(255,255,255,0.62)",
-    fontSize: 13,
-    textAlign: "center",
-    lineHeight: 18,
+    color: "#FFFFFF",
+    fontSize: 19,
+    fontWeight: "400",
+    letterSpacing: 0.2,
   },
   dots: {
-    marginTop: 22,
+    marginTop: 28,
     flexDirection: "row",
     justifyContent: "center",
-    gap: 14,
+    gap: 20,
   },
   dot: {
-    width: 14,
-    height: 14,
+    width: 13,
+    height: 13,
     borderRadius: 7,
     borderWidth: 1.5,
-    borderColor: "rgba(255,255,255,0.35)",
+    borderColor: "rgba(255,255,255,0.85)",
+    backgroundColor: "transparent",
   },
   dotFilled: {
     backgroundColor: "#FFFFFF",
     borderColor: "#FFFFFF",
   },
   error: {
-    marginTop: 12,
+    marginTop: 16,
     color: "#FF8B8B",
+    fontSize: 14,
     textAlign: "center",
-    fontSize: 13,
   },
   attempts: {
-    marginTop: 8,
-    color: "rgba(255,255,255,0.5)",
-    textAlign: "center",
-    fontSize: 12,
+    marginTop: 10,
+    color: "rgba(255,255,255,0.4)",
+    fontSize: 13,
+  },
+  padBlock: {
+    alignItems: "center",
   },
   pad: {
-    marginTop: 18,
+    width: "100%",
+    maxWidth: 320,
     flexDirection: "row",
     flexWrap: "wrap",
-    justifyContent: "space-between",
+    justifyContent: "center",
   },
   key: {
-    width: "30%",
-    aspectRatio: 1.4,
-    marginBottom: 10,
-    borderRadius: 14,
-    backgroundColor: "rgba(255,255,255,0.08)",
+    backgroundColor: "rgba(255,255,255,0.12)",
     alignItems: "center",
     justifyContent: "center",
   },
-  keyEmpty: {
-    backgroundColor: "transparent",
-  },
   keyPressed: {
-    backgroundColor: "rgba(255,255,255,0.18)",
+    backgroundColor: "rgba(255,255,255,0.26)",
   },
-  keyText: {
-    color: "#fff",
-    fontSize: 22,
+  keyDigit: {
+    color: "#FFFFFF",
+    fontSize: 32,
+    fontWeight: "300",
+    marginTop: 2,
+  },
+  zeroDigit: {
+    marginTop: 0,
+  },
+  keyLetters: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 10,
     fontWeight: "600",
+    letterSpacing: 1.5,
+    marginTop: -2,
   },
-  cancel: {
-    marginTop: 4,
-    paddingVertical: 12,
+  lettersSpacer: {
+    height: 10,
+  },
+  zeroRow: {
+    width: "100%",
+    maxWidth: 320,
+    flexDirection: "row",
+    justifyContent: "center",
     alignItems: "center",
   },
+  deleteHit: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  deleteHidden: {
+    opacity: 0,
+  },
+  footer: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 4,
+  },
+  footerSide: {
+    minWidth: 88,
+    alignItems: "flex-end",
+    paddingVertical: 10,
+  },
   cancelText: {
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 15,
+    color: "#FFFFFF",
+    fontSize: 17,
+    fontWeight: "400",
   },
 });

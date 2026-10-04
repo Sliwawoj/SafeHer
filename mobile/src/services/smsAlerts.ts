@@ -1,6 +1,6 @@
 import * as SMS from "expo-sms";
 
-import type { AgentMode, GeoLocation } from "../protocol";
+import type { GeoLocation } from "../protocol";
 import type { SmsDraft } from "../hooks/useLiveCall";
 
 export type AlertKind = "level1" | "level2" | "pin_fail";
@@ -12,7 +12,7 @@ function mapsLink(location: GeoLocation | null | undefined): string {
   return `https://maps.google.com/?q=${location.lat},${location.lng}`;
 }
 
-function silentDetails(smsDraft: SmsDraft | null): string {
+function threatDetails(smsDraft: SmsDraft | null): string {
   if (!smsDraft) return "brak dodatkowych szczegółów";
   const parts: string[] = [];
   if (smsDraft.suspectOutfit) parts.push(`ubiór: ${smsDraft.suspectOutfit}`);
@@ -31,7 +31,6 @@ function silentDetails(smsDraft: SmsDraft | null): string {
 
 export function composeAlertSms(params: {
   kind: AlertKind;
-  mode: AgentMode;
   location: GeoLocation | null | undefined;
   smsDraft: SmsDraft | null;
 }): string {
@@ -48,15 +47,9 @@ export function composeAlertSms(params: {
       `Sprawdź moją lokalizację: ${link}`
     );
   }
-  if (params.mode === "SILENT") {
-    return (
-      `[SafeHer Alert] Czuję zagrożenie. Moja pozycja: ${link}. ` +
-      `Szczegóły: ${silentDetails(params.smsDraft)}`
-    );
-  }
   return (
-    "[SafeHer Alert] Jestem w sytuacji zagrożenia, rozmawiam przez głośnik, żeby odstraszyć osobę w pobliżu. " +
-    `Śledź moją lokalizację: ${link}`
+    `[SafeHer Alert] Czuję zagrożenie. Moja pozycja: ${link}. ` +
+    `Szczegóły: ${threatDetails(params.smsDraft)}`
   );
 }
 
