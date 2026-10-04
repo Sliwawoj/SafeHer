@@ -1,9 +1,7 @@
 /**
  * Shared WebSocket message types — keep in sync with shared/PROTOCOL.md
- * Mobile imports this; backend mirrors the shape in Pydantic (Stage 1).
+ * Mobile imports this; backend mirrors the shape in Pydantic.
  */
-
-export type AgentMode = "LOUDSPEAKER" | "SILENT";
 
 export type AlertLevel = 1 | 2 | 3;
 
@@ -17,14 +15,12 @@ export interface GeoLocation {
 export type ClientMessage =
   | {
       type: "session.init";
-      mode: AgentMode;
       location: GeoLocation;
       locale?: string;
       contact_name?: string;
       client?: { platform: string; app_version: string };
     }
   | { type: "session.update_location"; location: GeoLocation }
-  | { type: "session.set_mode"; mode: AgentMode }
   | {
       type: "alert.trigger";
       level: AlertLevel;
@@ -49,23 +45,11 @@ export type ServerMessage =
       text: string;
     }
   | {
-      type: "tool.safe_haven";
-      place: {
-        name: string;
-        category: string;
-        lat: number;
-        lng: number;
-        distance_m: number;
-        hint: string;
-      };
-    }
-  | {
       type: "tool.sms_payload";
       level: AlertLevel;
       to_label: string;
       body: string;
       meta?: {
-        mode?: AgentMode;
         summary?: string | null;
         live_location_link?: string;
         suspect_outfit?: string | null;

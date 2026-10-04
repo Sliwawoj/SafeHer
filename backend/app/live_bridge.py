@@ -1,4 +1,4 @@
-"""Gemini Live session bridge: client WebSocket ↔ Gemini Live PCM + tools."""
+"""Gemini Live session bridge: client WebSocket ↔ Gemini Live PCM (no mid-call tools)."""
 
 from __future__ import annotations
 
@@ -15,12 +15,11 @@ from starlette.websockets import WebSocketState
 
 from .config import Settings
 from .overpass import get_nearby_safe_havens
-from .prompts import build_system_instruction, mode_switch_hint, pickup_nudge
+from .prompts import build_system_instruction, pickup_nudge
 from .protocol import (
     AlertTrigger,
     SessionEnd,
     SessionInit,
-    SessionSetMode,
     SessionState,
     SessionUpdateLocation,
     audio_interrupted_payload,
@@ -30,57 +29,48 @@ from .protocol import (
     sms_payload,
     transcript_payload,
 )
+from .threat_extract import extract_threat_bits, merge_user_note, notes_summary
 
 logger = logging.getLogger("safeher.live")
 
 GEMINI_CONNECT_ATTEMPTS = 3
 GEMINI_CONNECT_RETRY_DELAY_S = 0.8
+SAFE_HAVEN_PROMPT_LIMIT = 2
+# Cap Overpass wait so a slow map API doesn't delay the greeting.
+SAFE_HAVEN_LOAD_TIMEOUT_S = 2.5
+# Warm male-ish voice for partner/brother persona (native audio).
+GEMINI_VOICE_NAME = "Charon"
 
 
-def _live_tools() -> list[types.Tool]:
-    find_safe_haven = types.FunctionDeclaration(
-        name="find_safe_haven",
-        description=(
-            "Znajdź najbliższe otwarte/oświetlone bezpieczne miejsca "
-            "(stacja paliw, apteka, sklep, posterunek) względem aktualnej "
-            "pozycji GPS użytkowniczki. Zwraca 0–3 punkty z dystansem i kierunkiem."
+def _live_connect_config(system_instruction: str) -> types.LiveConnectConfig:
+    """Audio-only Live config. No tools — tool calls crash native-audio with 1007."""
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        system_instruction=system_instruction,
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                    voice_name=GEMINI_VOICE_NAME,
+                )
+            ),
+            language_code="pl-PL",
         ),
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={},
+        # Wait longer for her to finish; barge-in when she starts speaking.
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                silence_duration_ms=1400,
+                prefix_padding_ms=300,
+            ),
         ),
+        # Native-audio + thinking/tool turns → CONTENT_TYPE_AUDIO 1007 mid-call.
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        # User speech only — feeds SMS details without Live function-calling.
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=None,
+        tools=None,
     )
-    update_threat_info = types.FunctionDeclaration(
-        name="update_threat_info",
-        description=(
-            "Zapisz w tle ustalone szczegóły sytuacji do treści SMS (tryb SILENT). "
-            "Wywołuj tylko z polami, które faktycznie udało się ustalić z rozmowy. "
-            "W trybie LOUDSPEAKER nie używaj tego narzędzia."
-        ),
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "suspect_outfit": types.Schema(
-                    type=types.Type.STRING,
-                    description="Opis ubioru podejrzanej osoby, jeśli ustalony.",
-                    nullable=True,
-                ),
-                "distance_or_behavior": types.Schema(
-                    type=types.Type.STRING,
-                    description="Dystans lub zachowanie osoby, jeśli ustalone.",
-                    nullable=True,
-                ),
-                "landmark": types.Schema(
-                    type=types.Type.STRING,
-                    description="Punkt orientacyjny / landmark, jeśli ustalony.",
-                    nullable=True,
-                ),
-            },
-        ),
-    )
-    return [
-        types.Tool(function_declarations=[find_safe_haven, update_threat_info]),
-    ]
 
 
 class LiveBridge:
@@ -93,7 +83,6 @@ class LiveBridge:
         self._send_lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._gemini: Any | None = None
-        self._haven_task: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
         await self.ws.accept()
@@ -101,17 +90,13 @@ class LiveBridge:
             init = await self._await_session_init()
             self.state = SessionState(
                 session_id=f"sh_{uuid.uuid4().hex[:16]}",
-                mode=init.mode,
                 location=init.location,
                 locale=init.locale,
                 contact_name=init.contact_name,
             )
-            # Warm Overpass while Gemini handshake runs — greeting must not wait on it.
-            self._haven_task = asyncio.create_task(
-                self._prefetch_safe_havens(),
-                name="prefetch_safe_havens",
-            )
-            await self._run_gemini_session(init)
+            places = await self._load_safe_havens_fast()
+            self.state.cached_safe_havens = places
+            await self._run_gemini_session(init, places)
         except WebSocketDisconnect:
             logger.info("client disconnected")
         except Exception as exc:  # noqa: BLE001 — surface to client then close
@@ -121,9 +106,6 @@ class LiveBridge:
             )
         finally:
             self._stop.set()
-            if self._haven_task and not self._haven_task.done():
-                self._haven_task.cancel()
-                await asyncio.gather(self._haven_task, return_exceptions=True)
             await self._safe_close()
 
     async def _await_session_init(self) -> SessionInit:
@@ -146,32 +128,65 @@ class LiveBridge:
                 continue
             return SessionInit.model_validate(payload)
 
-    async def _run_gemini_session(self, init: SessionInit) -> None:
+    async def _load_safe_havens_fast(self) -> list[dict[str, Any]]:
         assert self.state is not None
+        loc = self.state.location
+        if loc is None:
+            return []
+        try:
+            places = await asyncio.wait_for(
+                get_nearby_safe_havens(
+                    loc.lat,
+                    loc.lng,
+                    radius=self.settings.safe_haven_radius_m,
+                    overpass_url=self.settings.overpass_url,
+                ),
+                timeout=SAFE_HAVEN_LOAD_TIMEOUT_S,
+            )
+        except TimeoutError:
+            logger.warning(
+                "safe_havens timeout session_id=%s — starting without POI",
+                self.state.session_id,
+            )
+            places = []
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "safe_havens failed session_id=%s",
+                self.state.session_id,
+                exc_info=True,
+            )
+            places = []
         logger.info(
-            "opening gemini live session_id=%s mode=%s model=%s",
+            "safe_havens_loaded session_id=%s count=%s",
             self.state.session_id,
-            self.state.mode,
+            len(places),
+        )
+        return places
+
+    async def _run_gemini_session(
+        self,
+        init: SessionInit,
+        safe_havens: list[dict[str, Any]],
+    ) -> None:
+        assert self.state is not None
+        prompt_havens = safe_havens[:SAFE_HAVEN_PROMPT_LIMIT]
+        logger.info(
+            "opening gemini live session_id=%s model=%s havens=%s",
+            self.state.session_id,
             self.settings.gemini_model,
+            len(prompt_havens),
         )
         client = genai.Client(
             api_key=self.settings.gemini_api_key,
             http_options={"api_version": "v1alpha"},
         )
         system_instruction = build_system_instruction(
-            init.mode,
             contact_name=init.contact_name,
             locale=init.locale,
             location=init.location.model_dump(),
+            safe_havens=prompt_havens,
         )
-        config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            system_instruction=system_instruction,
-            # Skip live STT — dialer doesn't need realtime transcripts; cuts audio loop latency.
-            input_audio_transcription=None,
-            output_audio_transcription=None,
-            tools=_live_tools(),
-        )
+        config = _live_connect_config(system_instruction)
 
         last_error: Exception | None = None
         for attempt in range(1, GEMINI_CONNECT_ATTEMPTS + 1):
@@ -180,7 +195,7 @@ class LiveBridge:
                     model=self.settings.gemini_model,
                     config=config,
                 ) as session:
-                    await self._run_live_session(session, init)
+                    await self._run_live_session(session, prompt_havens)
                 return
             except TimeoutError as exc:
                 last_error = exc
@@ -210,7 +225,11 @@ class LiveBridge:
             )
         )
 
-    async def _run_live_session(self, session: Any, init: SessionInit) -> None:
+    async def _run_live_session(
+        self,
+        session: Any,
+        safe_havens: list[dict[str, Any]],
+    ) -> None:
         assert self.state is not None
         self._gemini = session
         logger.info("gemini connected session_id=%s", self.state.session_id)
@@ -230,7 +249,7 @@ class LiveBridge:
             self._pump_gemini_to_client(session),
             name="gemini_to_client",
         )
-        await session.send_realtime_input(text=pickup_nudge(init.mode))
+        await session.send_realtime_input(text=pickup_nudge(safe_havens=safe_havens))
         done, pending = await asyncio.wait(
             {client_task, gemini_task},
             return_when=asyncio.FIRST_COMPLETED,
@@ -245,25 +264,6 @@ class LiveBridge:
             exc = task.exception()
             if exc and not isinstance(exc, WebSocketDisconnect):
                 raise exc
-
-    async def _prefetch_safe_havens(self) -> None:
-        assert self.state is not None
-        loc = self.state.location
-        if loc is None:
-            self.state.cached_safe_havens = []
-            return
-        places = await get_nearby_safe_havens(
-            loc.lat,
-            loc.lng,
-            radius=self.settings.safe_haven_radius_m,
-            overpass_url=self.settings.overpass_url,
-        )
-        self.state.cached_safe_havens = places
-        logger.info(
-            "prefetch_safe_havens session_id=%s count=%s",
-            self.state.session_id,
-            len(places),
-        )
 
     async def _pump_client_to_gemini(self, session: Any) -> None:
         mime = f"audio/pcm;rate={self.settings.audio_input_sample_rate}"
@@ -283,7 +283,7 @@ class LiveBridge:
 
                 text = message.get("text")
                 if text:
-                    should_end = await self._handle_control(session, text)
+                    should_end = await self._handle_control(text)
                     if should_end:
                         self._stop.set()
                         break
@@ -301,8 +301,12 @@ class LiveBridge:
                     if self._stop.is_set():
                         return
 
+                    # Tools disabled — if API still emits a call, ignore (don't crash audio).
                     if response.tool_call:
-                        await self._handle_tool_call(session, response.tool_call)
+                        logger.warning(
+                            "unexpected tool_call session_id=%s — ignored",
+                            self.state.session_id if self.state else "?",
+                        )
                         continue
 
                     server_content = response.server_content
@@ -324,119 +328,8 @@ class LiveBridge:
                 self._stop.set()
                 raise
 
-    async def _handle_tool_call(self, session: Any, tool_call: Any) -> None:
-        assert self.state is not None
-        calls = getattr(tool_call, "function_calls", None) or []
-        responses: list[types.FunctionResponse] = []
-        for fc in calls:
-            name = fc.name or ""
-            args = dict(fc.args or {})
-            logger.info(
-                "tool_call session_id=%s name=%s args=%s",
-                self.state.session_id,
-                name,
-                args,
-            )
-            try:
-                result = await self._dispatch_tool(name, args)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("tool %s failed", name)
-                result = {"ok": False, "error": str(exc)}
-            responses.append(
-                types.FunctionResponse(
-                    id=fc.id,
-                    name=name,
-                    response=result,
-                )
-            )
-        if responses:
-            await session.send_tool_response(function_responses=responses)
-
-    async def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        assert self.state is not None
-        if name == "find_safe_haven":
-            return await self._tool_find_safe_haven()
-        if name == "update_threat_info":
-            return await self._tool_update_threat_info(args)
-        return {"ok": False, "error": f"unknown_tool:{name}"}
-
-    async def _tool_find_safe_haven(self) -> dict[str, Any]:
-        assert self.state is not None
-        loc = self.state.location
-        if loc is None:
-            return {"ok": True, "places": [], "note": "brak lokalizacji GPS"}
-
-        if self.state.cached_safe_havens is None and self._haven_task is not None:
-            try:
-                await self._haven_task
-            except Exception:  # noqa: BLE001
-                logger.warning("prefetch_safe_havens await failed", exc_info=True)
-
-        if self.state.cached_safe_havens is not None:
-            places = self.state.cached_safe_havens
-            logger.info(
-                "find_safe_haven session_id=%s count=%s cached=true",
-                self.state.session_id,
-                len(places),
-            )
-            return {"ok": True, "places": places, "cached": True}
-
-        places = await get_nearby_safe_havens(
-            loc.lat,
-            loc.lng,
-            radius=self.settings.safe_haven_radius_m,
-            overpass_url=self.settings.overpass_url,
-        )
-        self.state.cached_safe_havens = places
-        logger.info(
-            "find_safe_haven session_id=%s count=%s cached=false",
-            self.state.session_id,
-            len(places),
-        )
-        return {"ok": True, "places": places, "cached": False}
-
-    async def _tool_update_threat_info(self, args: dict[str, Any]) -> dict[str, Any]:
-        assert self.state is not None
-        outfit = _optional_str(args.get("suspect_outfit"))
-        distance = _optional_str(args.get("distance_or_behavior"))
-        landmark = _optional_str(args.get("landmark"))
-
-        if not any((outfit, distance, landmark)):
-            return {"ok": False, "error": "no_fields"}
-
-        if self.state.mode == "LOUDSPEAKER":
-            # Spec: loudspeaker does not collect SMS details.
-            return {
-                "ok": False,
-                "error": "loudspeaker_no_threat_collection",
-            }
-
-        self.state.threat = self.state.threat.merge(
-            suspect_outfit=outfit,
-            distance_or_behavior=distance,
-            landmark=landmark,
-        )
-        payload = sms_payload(
-            level=1,
-            mode=self.state.mode,
-            location=self.state.location,
-            summary=self.state.last_summary,
-            threat=self.state.threat,
-        )
-        self.state.last_sms_body = payload["body"]
-        await self._safe_send_json(payload)
-        logger.info(
-            "update_threat_info session_id=%s threat=%s",
-            self.state.session_id,
-            self.state.threat.model_dump(),
-        )
-        return {
-            "ok": True,
-            "saved": self.state.threat.model_dump(exclude_none=True),
-        }
-
     async def _forward_transcriptions(self, server_content: Any) -> None:
-        """Best-effort; transcription may be disabled in LiveConnectConfig."""
+        """Capture user speech for SMS details (no Live tools)."""
         if server_content is None or self.state is None:
             return
         try:
@@ -444,8 +337,7 @@ class LiveBridge:
             if inp and getattr(inp, "text", None):
                 text = str(inp.text).strip()
                 if text:
-                    self.state.last_summary = text
-                    await self._safe_send_json(transcript_payload("user", text))
+                    await self._ingest_user_transcript(text)
 
             out = getattr(server_content, "output_transcription", None)
             if out and getattr(out, "text", None):
@@ -455,7 +347,41 @@ class LiveBridge:
         except Exception:  # noqa: BLE001 — never break the audio pump
             logger.debug("transcription forward skipped", exc_info=True)
 
-    async def _handle_control(self, session: Any, raw: str) -> bool:
+    async def _ingest_user_transcript(self, text: str) -> None:
+        """Accumulate user lines + extract threat bits for the SMS draft."""
+        assert self.state is not None
+        self.state.user_notes = merge_user_note(self.state.user_notes, text)
+        self.state.last_summary = notes_summary(self.state.user_notes)
+        await self._safe_send_json(transcript_payload("user", text))
+
+        bits = extract_threat_bits(text)
+        if not bits.has_any():
+            return
+
+        before = self.state.threat.model_dump()
+        self.state.threat = self.state.threat.merge(
+            suspect_outfit=bits.suspect_outfit,
+            distance_or_behavior=bits.distance_or_behavior,
+            landmark=bits.landmark,
+        )
+        if self.state.threat.model_dump() == before:
+            return
+
+        payload = sms_payload(
+            level=1,
+            location=self.state.location,
+            summary=self.state.last_summary,
+            threat=self.state.threat,
+        )
+        self.state.last_sms_body = payload["body"]
+        await self._safe_send_json(payload)
+        logger.info(
+            "threat_from_transcript session_id=%s threat=%s",
+            self.state.session_id,
+            self.state.threat.model_dump(exclude_none=True),
+        )
+
+    async def _handle_control(self, raw: str) -> bool:
         """Return True when the live session should end."""
         assert self.state is not None
         try:
@@ -470,32 +396,34 @@ class LiveBridge:
         if msg_type == "session.update_location":
             update = SessionUpdateLocation.model_validate(payload)
             self.state.location = update.location
-            self.state.cached_safe_havens = None
-            if self._haven_task and not self._haven_task.done():
-                self._haven_task.cancel()
-            self._haven_task = asyncio.create_task(
-                self._prefetch_safe_havens(),
-                name="prefetch_safe_havens",
-            )
             return False
 
         if msg_type == "session.set_mode":
-            set_mode = SessionSetMode.model_validate(payload)
-            self.state.mode = set_mode.mode
-            await session.send_realtime_input(text=mode_switch_hint(set_mode.mode))
+            logger.info(
+                "ignored legacy session.set_mode session_id=%s",
+                self.state.session_id,
+            )
             return False
 
         if msg_type == "alert.trigger":
             alert = AlertTrigger.model_validate(payload)
+            # Prefer structured threat; fall back to recent user notes as summary.
+            summary = self.state.last_summary or notes_summary(self.state.user_notes)
             sms = sms_payload(
                 level=alert.level,
-                mode=self.state.mode,
                 location=self.state.location,
-                summary=self.state.last_summary,
+                summary=summary,
                 threat=self.state.threat,
             )
             self.state.last_sms_body = sms["body"]
             await self._safe_send_json(sms)
+            logger.info(
+                "alert.trigger session_id=%s level=%s threat=%s summary=%s",
+                self.state.session_id,
+                alert.level,
+                self.state.threat.model_dump(exclude_none=True),
+                summary,
+            )
             return False
 
         if msg_type == "session.end":
@@ -532,10 +460,3 @@ class LiveBridge:
                 await self.ws.close()
             except Exception:  # noqa: BLE001
                 pass
-
-
-def _optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None

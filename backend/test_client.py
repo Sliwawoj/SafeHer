@@ -9,7 +9,7 @@ IMPORTANT: use headphones — no echo cancellation on the default devices.
 Usage (from backend/):
   .\\venv\\Scripts\\Activate.ps1
   python test_client.py
-  python test_client.py --mode SILENT --url ws://127.0.0.1:8000/ws/live
+  python test_client.py --url ws://127.0.0.1:8000/ws/live
 """
 
 from __future__ import annotations
@@ -33,9 +33,8 @@ MIC_BLOCK = 640
 
 
 class LiveTestClient:
-    def __init__(self, url: str, mode: str, contact_name: str) -> None:
+    def __init__(self, url: str, contact_name: str) -> None:
         self.url = url
-        self.mode = mode.upper()
         self.contact_name = contact_name
         self.mic_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=32)
         self.play_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -109,14 +108,13 @@ class LiveTestClient:
         ) as ws:
             init = {
                 "type": "session.init",
-                "mode": self.mode,
                 "location": {"lat": 52.2297, "lng": 21.0122, "accuracy_m": 10},
                 "locale": "pl-PL",
                 "contact_name": self.contact_name,
                 "client": {"platform": "desktop-test", "app_version": "0.1.0"},
             }
             await ws.send(json.dumps(init))
-            print(f"Sent session.init (mode={self.mode}). Waiting for session.ready…")
+            print("Sent session.init. Waiting for session.ready…")
 
             ready = False
             while not ready:
@@ -212,7 +210,7 @@ class LiveTestClient:
 
 
 async def _amain(args: argparse.Namespace) -> None:
-    client = LiveTestClient(args.url, args.mode, args.contact)
+    client = LiveTestClient(args.url, args.contact)
     loop = asyncio.get_running_loop()
 
     def _request_stop() -> None:
@@ -235,12 +233,6 @@ def main() -> None:
         "--url",
         default="ws://127.0.0.1:8000/ws/live",
         help="Backend WebSocket URL",
-    )
-    parser.add_argument(
-        "--mode",
-        default="LOUDSPEAKER",
-        choices=["LOUDSPEAKER", "SILENT"],
-        help="Agent mode",
     )
     parser.add_argument("--contact", default="Tata", help="Caller display name")
     args = parser.parse_args()

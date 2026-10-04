@@ -6,7 +6,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-AgentMode = Literal["LOUDSPEAKER", "SILENT"]
 AlertLevel = Literal[1, 2, 3]
 
 
@@ -50,21 +49,17 @@ class ThreatInfo(BaseModel):
 
 class SessionInit(BaseModel):
     type: Literal["session.init"] = "session.init"
-    mode: AgentMode = "LOUDSPEAKER"
     location: GeoLocation
     locale: str = "pl-PL"
     contact_name: str | None = None
     client: dict[str, Any] | None = None
+    # Legacy field from LOUDSPEAKER/SILENT split — ignored if present.
+    mode: str | None = None
 
 
 class SessionUpdateLocation(BaseModel):
     type: Literal["session.update_location"] = "session.update_location"
     location: GeoLocation
-
-
-class SessionSetMode(BaseModel):
-    type: Literal["session.set_mode"] = "session.set_mode"
-    mode: AgentMode
 
 
 class AlertTrigger(BaseModel):
@@ -120,13 +115,11 @@ def _live_location_link(location: GeoLocation | None) -> str:
 def sms_payload(
     *,
     level: int,
-    mode: str,
     location: GeoLocation | None,
     summary: str | None = None,
     threat: ThreatInfo | None = None,
 ) -> dict[str, Any]:
     maps = _live_location_link(location)
-    mode_key = (mode or "LOUDSPEAKER").upper()
     threat = threat or ThreatInfo()
     threat_parts = threat.as_summary_parts()
     threat_meta = {
@@ -147,17 +140,8 @@ def sms_payload(
         )
         if threat_parts:
             body = f"{body}\n" + " | ".join(threat_parts)
-    elif mode_key == "LOUDSPEAKER":
-        # Fixed loudspeaker template — no discrete threat extraction.
-        body = (
-            "Rozmawiam w trybie głośnomówiącym, aby odstraszyć osobę w pobliżu. "
-            f"Śledź moją lokalizację: {maps}"
-        )
     else:
-        body = (
-            "Rozmawiam w trybie cichym. "
-            f"Śledź moją lokalizację: {maps}"
-        )
+        body = f"Czuję zagrożenie. Śledź moją lokalizację: {maps}"
         details: list[str] = list(threat_parts)
         if summary and summary not in details:
             details.append(summary)
@@ -170,7 +154,6 @@ def sms_payload(
         "to_label": "trusted_contact",
         "body": body,
         "meta": {
-            "mode": mode_key,
             "summary": summary,
             "live_location_link": maps,
             **threat_meta,
@@ -180,11 +163,11 @@ def sms_payload(
 
 class SessionState(BaseModel):
     session_id: str
-    mode: AgentMode = "LOUDSPEAKER"
     location: GeoLocation | None = None
     locale: str = "pl-PL"
     contact_name: str | None = None
     last_summary: str | None = Field(default=None)
     threat: ThreatInfo = Field(default_factory=ThreatInfo)
+    user_notes: list[str] = Field(default_factory=list)
     last_sms_body: str | None = Field(default=None)
-    cached_safe_havens: list[dict[str, Any]] | None = Field(default=None)
+    cached_safe_havens: list[dict[str, Any]] = Field(default_factory=list)

@@ -32,6 +32,18 @@ _DIRECTION_PL = (
     "północny zachód",
 )
 
+# Conversational direction phrases for the agent prompt / speech.
+_DIRECTION_HINT_PL = (
+    "na północ",
+    "na północny wschód",
+    "na wschód",
+    "na południowy wschód",
+    "na południe",
+    "na południowy zachód",
+    "na zachód",
+    "na północny zachód",
+)
+
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     r = 6_371_000.0
@@ -53,6 +65,64 @@ def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 def _direction_pl(bearing: float) -> str:
     idx = int((bearing + 22.5) // 45) % 8
     return _DIRECTION_PL[idx]
+
+
+def _direction_hint_pl(bearing: float) -> str:
+    idx = int((bearing + 22.5) // 45) % 8
+    return _DIRECTION_HINT_PL[idx]
+
+
+def _round_distance_m(dist_m: int) -> int:
+    """Round to a speakable distance (50 / 100 / 150 …)."""
+    if dist_m < 40:
+        return max(20, dist_m)
+    if dist_m < 120:
+        return int(round(dist_m / 25.0) * 25)
+    if dist_m < 400:
+        return int(round(dist_m / 50.0) * 50)
+    return int(round(dist_m / 100.0) * 100)
+
+
+def _street_label(tags: dict[str, Any]) -> str | None:
+    """Build a short Polish street label from OSM addr:* tags."""
+    street = (
+        tags.get("addr:street")
+        or tags.get("street")
+        or tags.get("addr:place")
+        or ""
+    ).strip()
+    if not street:
+        return None
+    # Normalize common OSM forms → „ul. X”
+    lower = street.lower()
+    if lower.startswith(("ul.", "ul ", "al.", "al ", "pl.", "pl ")):
+        street_fmt = street
+    elif lower.startswith("ulica "):
+        street_fmt = "ul. " + street[6:].strip()
+    elif lower.startswith("aleja ") or lower.startswith("aleje "):
+        street_fmt = "al. " + street.split(" ", 1)[1].strip()
+    else:
+        street_fmt = f"ul. {street}"
+    number = (tags.get("addr:housenumber") or "").strip()
+    if number:
+        return f"{street_fmt} {number}"
+    return street_fmt
+
+
+def _build_hint(
+    *,
+    name: str,
+    category: str,
+    street: str | None,
+    dist_m: int,
+    direction_hint: str,
+) -> str:
+    """Human-readable fact for the agent, e.g. 'Żabka, ul. Floriańska — ok. 400 m na wschód'."""
+    cat = _CATEGORY_LABEL.get(category, "miejsce")
+    place = name if name else cat
+    rounded = _round_distance_m(dist_m)
+    where = f", {street}" if street else ""
+    return f"{place}{where} — ok. {rounded} m {direction_hint}"
 
 
 def _build_query(lat: float, lon: float, radius: int) -> str:
@@ -118,9 +188,11 @@ def _parse_elements(
         tags = el.get("tags") or {}
         category = _classify(tags)
         name = _display_name(tags, category)
+        street = _street_label(tags)
         dist = _haversine_m(lat, lon, plat, plon)
         bearing = _bearing_deg(lat, lon, plat, plon)
         direction = _direction_pl(bearing)
+        direction_hint = _direction_hint_pl(bearing)
         dist_m = int(round(dist))
         key = (name.lower(), dist_m // 25)
         if key in seen:
@@ -132,11 +204,18 @@ def _parse_elements(
                 {
                     "name": name,
                     "category": category,
+                    "street": street,
                     "lat": plat,
                     "lng": plon,
                     "distance_m": dist_m,
                     "direction": direction,
-                    "hint": f"{dist_m}m na {direction}",
+                    "hint": _build_hint(
+                        name=name,
+                        category=category,
+                        street=street,
+                        dist_m=dist_m,
+                        direction_hint=direction_hint,
+                    ),
                 },
             )
         )

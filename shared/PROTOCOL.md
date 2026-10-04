@@ -1,5 +1,5 @@
 # SafeHer — shared WebSocket protocol (mobile ↔ backend)
-# Version: 0.1 (Stage 0)
+# Version: 0.2
 
 ## Transport
 - URL: `ws://<host>:8000/ws/live`
@@ -15,6 +15,9 @@
 
 Binary frames have **no envelope**. Session must be initialized before audio.
 
+Single conversation mode: natural earpiece call (no LOUDSPEAKER / SILENT split).
+Safe Havens are fetched once at session start and injected into the system prompt — no mid-call POI tool calls.
+
 ---
 
 ## Client → Server (JSON text)
@@ -25,7 +28,6 @@ Sent once after WebSocket open.
 ```json
 {
   "type": "session.init",
-  "mode": "LOUDSPEAKER",
   "location": { "lat": 52.2297, "lng": 21.0122, "accuracy_m": 12 },
   "locale": "pl-PL",
   "contact_name": "Tata",
@@ -33,10 +35,8 @@ Sent once after WebSocket open.
 }
 ```
 
-`mode`: `"LOUDSPEAKER"` | `"SILENT"`
-
 ### 2. `session.update_location`
-Periodic GPS updates during call.
+Periodic GPS updates during call (location only — does not re-query Overpass).
 
 ```json
 {
@@ -45,17 +45,7 @@ Periodic GPS updates during call.
 }
 ```
 
-### 3. `session.set_mode`
-Switch loudspeaker ↔ silent mid-call if needed.
-
-```json
-{
-  "type": "session.set_mode",
-  "mode": "SILENT"
-}
-```
-
-### 4. `alert.trigger`
+### 3. `alert.trigger`
 Hardware trigger / duress fail-safe from the device.
 
 ```json
@@ -66,9 +56,9 @@ Hardware trigger / duress fail-safe from the device.
 }
 ```
 
-`level`: `1` (silent SMS) | `2` (escalation) | `3` (duress / bad PIN)
+`level`: `1` (SMS) | `2` (escalation) | `3` (duress / bad PIN)
 
-### 5. `session.end`
+### 4. `session.end`
 Graceful hang-up after correct Duress PIN.
 
 ```json
@@ -106,24 +96,7 @@ Backend connected to Gemini Live; client may start mic stream.
 }
 ```
 
-### 3. `tool.safe_haven`
-Function-calling result: nearest safe place.
-
-```json
-{
-  "type": "tool.safe_haven",
-  "place": {
-    "name": "Orlen",
-    "category": "fuel",
-    "lat": 52.2310,
-    "lng": 21.0142,
-    "distance_m": 180,
-    "hint": "Skręć w prawo — stacja Orlen po lewej"
-  }
-}
-```
-
-### 4. `tool.sms_payload`
+### 3. `tool.sms_payload`
 Structured data for `expo-sms` (device sends SMS natively).
 
 ```json
@@ -131,9 +104,8 @@ Structured data for `expo-sms` (device sends SMS natively).
   "type": "tool.sms_payload",
   "level": 1,
   "to_label": "trusted_contact",
-  "body": "Rozmawiam w trybie głośnomówiącym... Śledź lokalizację: https://maps.google.com/?q=52.23,21.01",
+  "body": "Czuję zagrożenie. Śledź moją lokalizację: https://maps.google.com/?q=52.23,21.01",
   "meta": {
-    "mode": "SILENT",
     "summary": "Facet w czarnej kurtce z kapturem",
     "live_location_link": "https://maps.google.com/?q=50.06,19.93",
     "suspect_outfit": "czarna bluza z kapturem",
@@ -143,7 +115,7 @@ Structured data for `expo-sms` (device sends SMS natively).
 }
 ```
 
-### 5. `session.error`
+### 4. `session.error`
 ```json
 {
   "type": "session.error",
@@ -152,7 +124,7 @@ Structured data for `expo-sms` (device sends SMS natively).
 }
 ```
 
-### 6. `session.ended`
+### 5. `session.ended`
 ```json
 {
   "type": "session.ended",
@@ -160,7 +132,7 @@ Structured data for `expo-sms` (device sends SMS natively).
 }
 ```
 
-### 7. `audio.interrupted`
+### 6. `audio.interrupted`
 Gemini barge-in / user interruption — client **must flush** playback buffer.
 
 ```json
@@ -186,7 +158,7 @@ No base64 in MVP binary path. If a debugger needs text, use optional:
 ## Minimal happy path
 
 1. Client opens WS → sends `session.init`
-2. Server replies `session.ready`
+2. Server fetches Safe Havens once, injects into prompt, connects Gemini → `session.ready`
 3. Client streams mic binary; plays incoming binary
 4. On power×3 → `alert.trigger` → server replies `tool.sms_payload` → `expo-sms`
 5. Client `session.end` → server `session.ended` → close
